@@ -71,10 +71,8 @@ class TestGerritFetch:
     @pytest.mark.asyncio
     async def test_gerrit_fetch_returns_text(self, monkeypatch):
         """Gerrit API response text is returned."""
-        monkeypatch.setenv("GERRIT_URL", "http://gerrit.example.com")
-        import importlib
         import src.gerrit_mcp.code_fetcher as cf_module
-        importlib.reload(cf_module)
+        monkeypatch.setitem(cf_module.SERVICE_URLS, "gerrit", "http://gerrit.example.com")
 
         respx.get(
             "http://gerrit.example.com/a/projects/my-repo/branches/main/files/src/app.py/content"

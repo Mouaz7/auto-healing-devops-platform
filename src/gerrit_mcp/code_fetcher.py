@@ -8,6 +8,8 @@ import pathlib
 
 import httpx
 
+from src.shared.config import SERVICE_URLS
+
 logger = logging.getLogger(__name__)
 
 _GITHUB_API = "https://api.github.com"
@@ -56,7 +58,7 @@ class CodeFetcher:
             return base64.b64decode(content).decode("utf-8")
 
     async def _gerrit_fetch(self, repo: str, file_path: str, ref: str) -> str:
-        gerrit_url = os.getenv("GERRIT_URL", "http://localhost:8083")
+        gerrit_url = SERVICE_URLS["gerrit"]
         url = (
             f"{gerrit_url}/a/projects/{repo}/branches/{ref}"
             f"/files/{file_path}/content"
