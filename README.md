@@ -1,4 +1,5 @@
 # Auto-Healing AI DevOps Platform
+[![Built with Claude Code](https://img.shields.io/badge/Built%20with-Claude%20Code-orange?logo=anthropic)](https://claude.ai/code)
 
 > Automated Remediation in CI/CD: Design and Control of an AI-based Code Repair Agent
 
@@ -113,8 +114,6 @@ docker-compose up --build
 # Run demo (requires services running)
 python scripts/demo.py
 ```
-
-> **Model configuration:** See [`.agents/workflows/agent-plan.md`](.agents/workflows/agent-plan.md) for detailed per-agent model and API key setup.
 
 ## Project Structure
 
