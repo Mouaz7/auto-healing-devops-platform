@@ -49,3 +49,7 @@ logs/
 tmp/
 temp/
 *.tmp
+
+# Sprint planning & Claude internals
+.agents/
+.claude/
