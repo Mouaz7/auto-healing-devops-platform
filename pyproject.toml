@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto-healing-devops"
+version = "0.1.0"
+description = "Auto-Healing AI DevOps Platform - Automated Remediation in CI/CD"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [
+    {name = "Ahmad Darwich", email = "ahda23@student.bth.se"},
+    {name = "Mouaz Naji", email = "moap23@student.bth.se"},
+]
+
+dependencies = [
+    # MCP Protocol
+    "mcp>=1.0.0",
+    # HTTP
+    "httpx>=0.27.0",
+    "aiohttp>=3.9.0",
+    # LLM API clients
+    "openai>=1.30.0",
+    "anthropic>=0.25.0",
+    # Scheduling
+    "apscheduler>=3.10.0",
+    # Monitoring
+    "prometheus-client>=0.20.0",
+    # Data models
+    "pydantic>=2.6.0",
+    # Utilities
+    "python-dotenv>=1.0.0",
+    "structlog>=24.1.0",
+    "tiktoken>=0.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
+    "pytest-mock>=3.14.0",
+    "pylint>=3.1.0",
+    "bandit>=1.7.8",
+    "black>=24.3.0",
+    "isort>=5.13.0",
+    "mypy>=1.9.0",
+    "pre-commit>=3.7.0",
+    "respx>=0.21.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests",
+    "slow: Slow tests",
+]
+
+[tool.pylint.main]
+load-plugins = ["pylint.extensions.docparams"]
+ignore-paths = ["tests/", "docs/"]
+
+[tool.pylint.messages_control]
+disable = [
+    "missing-module-docstring",
+    "too-few-public-methods",
+]
+
+[tool.pylint.format]
+max-line-length = 120
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+skips = ["B101"]
+
+[tool.black]
+line-length = 120
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 120
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true

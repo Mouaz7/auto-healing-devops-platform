@@ -1,0 +1,213 @@
+version: "3.9"
+
+services:
+  # Agent 3: Log Analyst
+  log-cleaner-mcp:
+    build: .
+    container_name: log-cleaner-mcp
+    command: python -m src.log_cleaner_mcp.server
+    ports:
+      - "8081:8081"
+    environment:
+      - SERVICE_NAME=log_cleaner
+      - SERVICE_PORT=8081
+      - LOG_LEVEL=INFO
+      - PRIMARY_MODEL=${LOG_ANALYST_PRIMARY_MODEL:-}
+      - FALLBACK_MODEL_1=${LOG_ANALYST_FALLBACK_1:-}
+      - FALLBACK_MODEL_2=${LOG_ANALYST_FALLBACK_2:-}
+      - FALLBACK_MODEL_3=${LOG_ANALYST_FALLBACK_3:-}
+      - MAX_TOKENS_PER_REQUEST=2000
+      - MAX_TOKENS_PER_HOUR=20000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8081/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - agent-network
+
+  # Agent 1: Pipeline Monitor
+  jenkins-mcp:
+    build: .
+    container_name: jenkins-mcp
+    command: python -m src.jenkins_mcp.server
+    ports:
+      - "8082:8082"
+    environment:
+      - SERVICE_NAME=jenkins
+      - SERVICE_PORT=8082
+      - LOG_LEVEL=INFO
+      - JENKINS_URL=${JENKINS_URL:-http://localhost:8080}
+      - JENKINS_USER=${JENKINS_USER:-}
+      - JENKINS_TOKEN=${JENKINS_TOKEN:-}
+      - PRIMARY_MODEL=${PIPELINE_MONITOR_PRIMARY_MODEL:-}
+      - FALLBACK_MODEL_1=${PIPELINE_MONITOR_FALLBACK_1:-}
+      - FALLBACK_MODEL_2=${PIPELINE_MONITOR_FALLBACK_2:-}
+      - FALLBACK_MODEL_3=${PIPELINE_MONITOR_FALLBACK_3:-}
+      - MAX_TOKENS_PER_REQUEST=500
+      - MAX_TOKENS_PER_HOUR=5000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8082/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - agent-network
+
+  # Gerrit/GitHub MCP (code fetch + patch submit)
+  gerrit-mcp:
+    build: .
+    container_name: gerrit-mcp
+    command: python -m src.gerrit_mcp.server
+    ports:
+      - "8083:8083"
+    environment:
+      - SERVICE_NAME=gerrit
+      - SERVICE_PORT=8083
+      - LOG_LEVEL=INFO
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GERRIT_URL=${GERRIT_URL:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8083/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - agent-network
+
+  # Agent 4: Error Analyst
+  knowledge-graph-mcp:
+    build: .
+    container_name: knowledge-graph-mcp
+    command: python -m src.knowledge_graph_mcp.server
+    ports:
+      - "8084:8084"
+    environment:
+      - SERVICE_NAME=knowledge_graph
+      - SERVICE_PORT=8084
+      - LOG_LEVEL=INFO
+      - PRIMARY_MODEL=${ERROR_ANALYST_PRIMARY_MODEL:-}
+      - FALLBACK_MODEL_1=${ERROR_ANALYST_FALLBACK_1:-}
+      - FALLBACK_MODEL_2=${ERROR_ANALYST_FALLBACK_2:-}
+      - FALLBACK_MODEL_3=${ERROR_ANALYST_FALLBACK_3:-}
+      - MAX_TOKENS_PER_REQUEST=3000
+      - MAX_TOKENS_PER_HOUR=30000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8084/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - agent-network
+
+  # Orchestrator (central workflow)
+  orchestrator-mcp:
+    build: .
+    container_name: orchestrator-mcp
+    command: python -m src.orchestrator_mcp.server
+    ports:
+      - "8085:8085"
+    environment:
+      - SERVICE_NAME=orchestrator
+      - SERVICE_PORT=8085
+      - LOG_LEVEL=INFO
+      - LOG_CLEANER_URL=http://log-cleaner-mcp:8081
+      - JENKINS_URL=http://jenkins-mcp:8082
+      - GERRIT_URL=http://gerrit-mcp:8083
+      - KNOWLEDGE_GRAPH_URL=http://knowledge-graph-mcp:8084
+      - LLM_URL=http://llm-mcp:8086
+      - NOTIFICATION_URL=http://notification-mcp:8087
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8085/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      - log-cleaner-mcp
+      - jenkins-mcp
+      - gerrit-mcp
+      - knowledge-graph-mcp
+      - llm-mcp
+      - notification-mcp
+    networks:
+      - agent-network
+
+  # Agent 5: Code Repairer
+  llm-mcp:
+    build: .
+    container_name: llm-mcp
+    command: python -m src.llm_mcp.server
+    ports:
+      - "8086:8086"
+    environment:
+      - SERVICE_NAME=llm
+      - SERVICE_PORT=8086
+      - LOG_LEVEL=INFO
+      - PRIMARY_MODEL=${CODE_REPAIRER_PRIMARY_MODEL:-}
+      - FALLBACK_MODEL_1=${CODE_REPAIRER_FALLBACK_1:-}
+      - FALLBACK_MODEL_2=${CODE_REPAIRER_FALLBACK_2:-}
+      - FALLBACK_MODEL_3=${CODE_REPAIRER_FALLBACK_3:-}
+      - MAX_TOKENS_PER_REQUEST=4000
+      - MAX_TOKENS_PER_HOUR=50000
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8086/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - agent-network
+
+  # Agent 6: Review & Notify
+  notification-mcp:
+    build: .
+    container_name: notification-mcp
+    command: python -m src.notification_mcp.server
+    ports:
+      - "8087:8087"
+    environment:
+      - SERVICE_NAME=notification
+      - SERVICE_PORT=8087
+      - LOG_LEVEL=INFO
+      - PRIMARY_MODEL=${REVIEW_NOTIFY_PRIMARY_MODEL:-}
+      - FALLBACK_MODEL_1=${REVIEW_NOTIFY_FALLBACK_1:-}
+      - FALLBACK_MODEL_2=${REVIEW_NOTIFY_FALLBACK_2:-}
+      - FALLBACK_MODEL_3=${REVIEW_NOTIFY_FALLBACK_3:-}
+      - MAX_TOKENS_PER_REQUEST=2000
+      - MAX_TOKENS_PER_HOUR=20000
+      - TEAMS_WEBHOOK_URL=${TEAMS_WEBHOOK_URL:-}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8087/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - agent-network
+
+  # Scheduler (Agent 2: Task Inspector ingår här)
+  scheduler:
+    build: .
+    container_name: scheduler
+    command: python -m src.scheduler.monitor
+    environment:
+      - SERVICE_NAME=scheduler
+      - LOG_LEVEL=INFO
+      - ORCHESTRATOR_URL=http://orchestrator-mcp:8085
+      - SCHEDULE_INTERVAL_MINUTES=15
+      - PRIMARY_MODEL=${TASK_INSPECTOR_PRIMARY_MODEL:-}
+      - FALLBACK_MODEL_1=${TASK_INSPECTOR_FALLBACK_1:-}
+      - FALLBACK_MODEL_2=${TASK_INSPECTOR_FALLBACK_2:-}
+      - FALLBACK_MODEL_3=${TASK_INSPECTOR_FALLBACK_3:-}
+      - MAX_TOKENS_PER_REQUEST=1000
+      - MAX_TOKENS_PER_HOUR=10000
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+    depends_on:
+      - orchestrator-mcp
+    networks:
+      - agent-network
+
+networks:
+  agent-network:
+    driver: bridge
