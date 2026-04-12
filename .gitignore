@@ -50,6 +50,39 @@ tmp/
 temp/
 *.tmp
 
+# Coverage reports
+.coverage.*
+coverage/
+
+# Pytest
+junit.xml
+test-results/
+
+# Type checking
+.pytype/
+pyrightconfig.json
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Secrets & keys
+*.pem
+*.key
+*.p12
+secrets/
+
+# Docker volumes / data
+postgres-data/
+redis-data/
+
+# Node (om frontend läggs till)
+node_modules/
+package-lock.json
+
+# Profiling
+*.prof
+
 # Sprint planning & Claude internals
 .agents/
 .claude/
