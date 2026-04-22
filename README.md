@@ -109,10 +109,16 @@ pylint src/
 bandit -r src/
 
 # Run all services
-docker-compose up --build
+docker compose up --build
 
 # Run demo (requires services running)
 python scripts/demo.py
+
+# Expose orchestrator publicly via ngrok (required for GitHub Actions)
+# Terminal 1: keep docker compose running
+# Terminal 2: run ngrok
+ngrok http --url=washhouse-shopper-retry.ngrok-free.dev 8085
+# Public URL: https://washhouse-shopper-retry.ngrok-free.dev
 ```
 
 ## Project Structure

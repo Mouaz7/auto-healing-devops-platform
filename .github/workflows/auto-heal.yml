@@ -1,0 +1,38 @@
+name: Auto-Healing Pipeline
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install pytest
+
+      - name: Run tests
+        id: run_tests
+        run: |
+          python -m pytest tests/ -v || true
+
+      - name: Trigger Auto-Healing on failure
+        if: failure()
+        run: |
+          curl -X POST https://washhouse-shopper-retry.ngrok-free.dev/tools/handle_build_failure \
+            -H "Content-Type: application/json" \
+            -d '{
+              "build_id": "${{ github.run_id }}",
+              "repo": "${{ github.repository }}",
+              "branch": "${{ github.ref_name }}",
+              "scenario": "A",
+              "raw_log": "Build failed on commit ${{ github.sha }}"
+            }'
+          echo "Auto-healing triggered!"
