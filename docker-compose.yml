@@ -6,6 +6,7 @@ services:
     build: .
     container_name: log-cleaner-mcp
     command: python -m src.log_cleaner_mcp.server
+    env_file: .env
     ports:
       - "8081:8081"
     environment:
@@ -31,6 +32,7 @@ services:
     build: .
     container_name: jenkins-mcp
     command: python -m src.jenkins_mcp.server
+    env_file: .env
     ports:
       - "8082:8082"
     environment:
@@ -59,6 +61,7 @@ services:
     build: .
     container_name: gerrit-mcp
     command: python -m src.gerrit_mcp.server
+    env_file: .env
     ports:
       - "8083:8083"
     environment:
@@ -80,6 +83,7 @@ services:
     build: .
     container_name: knowledge-graph-mcp
     command: python -m src.knowledge_graph_mcp.server
+    env_file: .env
     ports:
       - "8084:8084"
     environment:
@@ -105,6 +109,7 @@ services:
     build: .
     container_name: orchestrator-mcp
     command: python -m src.orchestrator_mcp.server
+    env_file: .env
     ports:
       - "8085:8085"
     environment:
@@ -137,6 +142,7 @@ services:
     build: .
     container_name: llm-mcp
     command: python -m src.llm_mcp.server
+    env_file: .env
     ports:
       - "8086:8086"
     environment:
@@ -164,6 +170,7 @@ services:
     build: .
     container_name: notification-mcp
     command: python -m src.notification_mcp.server
+    env_file: .env
     ports:
       - "8087:8087"
     environment:
@@ -191,6 +198,7 @@ services:
     build: .
     container_name: scheduler
     command: python -m src.scheduler.monitor
+    env_file: .env
     environment:
       - SERVICE_NAME=scheduler
       - LOG_LEVEL=INFO

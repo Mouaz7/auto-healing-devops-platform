@@ -17,7 +17,7 @@ _SLACK_TEMPLATES: dict[str, dict] = {
     "GREEN": {
         "blocks": [
             {"type": "header",
-             "text": {"type": "plain_text", "text": "Auto-fix Applied"}},
+             "text": {"type": "plain_text", "text": "✅ Auto-fix Applied"}},
             {"type": "section",
              "text": {"type": "mrkdwn",
                       "text": "*Build:* __BUILD_ID__\n*Confidence:* __SCORE_PCT__%\n"
@@ -27,17 +27,17 @@ _SLACK_TEMPLATES: dict[str, dict] = {
     "YELLOW": {
         "blocks": [
             {"type": "header",
-             "text": {"type": "plain_text", "text": "Review Required"}},
+             "text": {"type": "plain_text", "text": "🟡 Human Review Required"}},
             {"type": "section",
              "text": {"type": "mrkdwn",
                       "text": "*Build:* __BUILD_ID__\n*Confidence:* __SCORE_PCT__%\n"
-                              "*Reason:* __REASON__"}},
+                              "*Reason:* __REASON__\n__EXPLANATION__"}},
         ],
     },
     "RED": {
         "blocks": [
             {"type": "header",
-             "text": {"type": "plain_text", "text": "Fix Blocked"}},
+             "text": {"type": "plain_text", "text": "🔴 Fix Blocked"}},
             {"type": "section",
              "text": {"type": "mrkdwn",
                       "text": "*Build:* __BUILD_ID__\n*Reason:* __REASON__\n"
@@ -58,6 +58,70 @@ def render_payload(colour: str, build_id: str, score: float,
     raw = raw.replace("__FILES__",       files)
     raw = raw.replace("__EXPLANATION__", explanation)
     return raw
+
+
+async def send_slack_review_buttons(
+    build_id: str,
+    pr_url: str,
+    pr_number: int,
+    repo: str,
+    score: float,
+    explanation: str = "",
+) -> bool:
+    """Send YELLOW review message with Approve/Reject buttons to Slack."""
+    if not _SLACK_WEBHOOK_URL:
+        return False
+
+    payload = {
+        "blocks": [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": "🟡 AI Fix — Human Review Required"},
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*Build:* `{build_id}`\n"
+                        f"*Confidence:* {round(score * 100)}%\n"
+                        f"*PR:* <{pr_url}|View on GitHub>\n"
+                        f"*Fix:* {explanation[:300]}"
+                    ),
+                },
+            },
+            {"type": "divider"},
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "✅ Approve & Merge"},
+                        "style": "primary",
+                        "action_id": "approve_fix",
+                        "value": f"{repo}|{pr_number}|{build_id}",
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "❌ Reject"},
+                        "style": "danger",
+                        "action_id": "reject_fix",
+                        "value": f"{repo}|{pr_number}|{build_id}",
+                    },
+                ],
+            },
+        ]
+    }
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            _SLACK_WEBHOOK_URL,
+            content=json.dumps(payload),
+            headers={"Content-Type": "application/json"},
+        )
+        ok = resp.status_code == 200
+        logger.info("slack_review_buttons build_id=%s ok=%s", build_id, ok)
+        return ok
 
 
 async def send_slack_notification(

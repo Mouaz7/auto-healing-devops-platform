@@ -14,10 +14,14 @@ import os
 import httpx
 from aiohttp import web
 
+import json
+import urllib.parse
+
 from src.shared.config import SERVICE_URLS
 from src.shared.mcp_base import MCPServiceBase
 from src.shared.models import WorkflowState, WorkflowStatus
 from src.shared.resilience import handle_agent_failure, trigger_global_fallback
+from src.notification_mcp.slack_notifier import send_slack_review_buttons
 from src.orchestrator_mcp.workflow import (
     WorkflowEngine,
     InvalidTransitionError,
@@ -27,7 +31,7 @@ from src.gerrit_mcp.github_approver import extract_build_id
 
 logger = logging.getLogger(__name__)
 
-_HTTP_TIMEOUT = 60.0   # seconds per agent call
+_HTTP_TIMEOUT = 180.0   # seconds per agent call (LLM can be slow)
 _GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 
 
@@ -55,6 +59,7 @@ class OrchestratorMCPServer(MCPServiceBase):
         self.app.router.add_post("/tools/handle_build_failure",   self.handle_build_failure)
         self.app.router.add_get("/tools/get_workflow_status",     self.get_workflow_status)
         self.app.router.add_post("/webhooks/github",              self.github_webhook)
+        self.app.router.add_post("/webhooks/slack",               self.slack_webhook)
         self.app.router.add_post("/workflows",                    self.create_workflow)
         self.app.router.add_get("/workflows/active",              self.list_active)
         self.app.router.add_get("/workflows/{build_id}",          self.get_workflow)
@@ -186,16 +191,35 @@ class OrchestratorMCPServer(MCPServiceBase):
         pr_url = ""
 
         if colour == "GREEN" and verdict.get("auto_merge_allowed"):
-            self.engine.advance(build_id, WorkflowStatus.APPLYING_FIX)
-            self.engine.advance(build_id, WorkflowStatus.COMPLETED)
-
-        elif colour == "YELLOW":
-            self.engine.advance(build_id, WorkflowStatus.AWAITING_REVIEW)
-            # Create GitHub PR so the team can approve via GitHub
+            # Create PR and auto-merge so fix is traceable in GitHub
             if repo:
                 pr_url = await self._create_github_pr(
                     client, build_id, repo,
                     fix["fix_patch"], analysis["affected_files"],
+                    auto_merge=True,
+                )
+            self.engine.advance(build_id, WorkflowStatus.APPLYING_FIX)
+            self.engine.advance(build_id, WorkflowStatus.COMPLETED)
+
+        elif colour == "YELLOW":
+            # Create PR — human must review and approve before merge
+            self.engine.advance(build_id, WorkflowStatus.AWAITING_REVIEW)
+            if repo:
+                pr_data = await self._create_github_pr_with_number(
+                    client, build_id, repo,
+                    fix["fix_patch"], analysis["affected_files"],
+                    auto_merge=False,
+                )
+                pr_url = pr_data.get("pr_url", "")
+                pr_number = pr_data.get("pr_number", 0)
+                # Send Slack message with Approve/Reject buttons
+                await send_slack_review_buttons(
+                    build_id=build_id,
+                    pr_url=pr_url,
+                    pr_number=pr_number,
+                    repo=repo,
+                    score=fix["confidence"],
+                    explanation=fix.get("explanation", ""),
                 )
 
         else:
@@ -222,9 +246,15 @@ class OrchestratorMCPServer(MCPServiceBase):
         repo: str,
         patch: str,
         affected_files: list,
+        auto_merge: bool = False,
     ) -> str:
         """Call gerrit-mcp to open a GitHub PR. Returns the PR URL or empty string."""
         try:
+            title = (
+                f"[auto-heal][GREEN] Auto-fix build {build_id}"
+                if auto_merge else
+                f"[auto-heal][YELLOW] Human review required — build {build_id}"
+            )
             resp = await client.post(
                 f"{SERVICE_URLS['gerrit']}/tools/submit_patch",
                 json={
@@ -232,15 +262,208 @@ class OrchestratorMCPServer(MCPServiceBase):
                     "repo":           repo,
                     "patch":          patch,
                     "affected_files": affected_files,
+                    "title":          title,
                 },
             )
             resp.raise_for_status()
-            pr_url = str(resp.json().get("pr_url", ""))
-            logger.info("github_pr_created build_id=%s pr_url=%s", build_id, pr_url)
+            pr_data = resp.json()
+            pr_url = str(pr_data.get("pr_url", ""))
+            pr_number = pr_data.get("pr_number", 0)
+            logger.info(
+                "github_pr_created build_id=%s pr_url=%s auto_merge=%s",
+                build_id, pr_url, auto_merge,
+            )
+            # Auto-merge if GREEN and PR was created
+            if auto_merge and pr_number:
+                await self._merge_pr(client, repo, pr_number)
             return pr_url
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning("github_pr_failed build_id=%s error=%s", build_id, exc)
             return ""
+
+    async def _create_github_pr_with_number(
+        self,
+        client: httpx.AsyncClient,
+        build_id: str,
+        repo: str,
+        patch: str,
+        affected_files: list,
+        auto_merge: bool = False,
+    ) -> dict:
+        """Like _create_github_pr but returns full dict with pr_number."""
+        try:
+            title = (
+                f"[auto-heal][GREEN] Auto-fix build {build_id}"
+                if auto_merge else
+                f"[auto-heal][YELLOW] Human review required — build {build_id}"
+            )
+            resp = await client.post(
+                f"{SERVICE_URLS['gerrit']}/tools/submit_patch",
+                json={
+                    "build_id":       build_id,
+                    "repo":           repo,
+                    "patch":          patch,
+                    "affected_files": affected_files,
+                    "title":          title,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning("github_pr_failed build_id=%s error=%s", build_id, exc)
+            return {"pr_url": "", "pr_number": 0, "branch": ""}
+
+    async def slack_webhook(self, request: web.Request) -> web.Response:
+        """Handle Slack interactive button clicks (Approve / Reject)."""
+        body = await request.text()
+        payload_str = urllib.parse.unquote(body.replace("payload=", "", 1))
+        try:
+            payload = json.loads(payload_str)
+        except Exception:  # pylint: disable=broad-exception-caught
+            return web.Response(text="invalid payload", status=400)
+
+        actions = payload.get("actions", [])
+        response_url = payload.get("response_url", "")
+        if not actions:
+            return web.Response(text="ok")
+
+        action = actions[0]
+        action_id = action.get("action_id", "")
+        value = action.get("value", "")
+
+        try:
+            repo, pr_number_str, build_id = value.split("|")
+            pr_number = int(pr_number_str)
+        except ValueError:
+            return web.Response(text="invalid value", status=400)
+
+        token = os.getenv("GITHUB_TOKEN", "")
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github+json",
+        }
+        pr_url = f"https://github.com/{repo}/pull/{pr_number}"
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            if action_id == "approve_fix":
+                resp = await client.put(
+                    f"https://api.github.com/repos/{repo}/pulls/{pr_number}/merge",
+                    headers=headers,
+                    json={"merge_method": "squash"},
+                )
+                if resp.status_code == 200:
+                    logger.info("slack_approved build_id=%s pr=%d", build_id, pr_number)
+                    updated_msg = {
+                        "replace_original": True,
+                        "blocks": [
+                            {
+                                "type": "header",
+                                "text": {"type": "plain_text", "text": "✅ Fix Approved & Merged"},
+                            },
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": (
+                                        f"*Build:* `{build_id}`\n"
+                                        f"*PR:* <{pr_url}|#{pr_number}> — merged successfully\n"
+                                        f"*Approved by:* <@{payload.get('user', {}).get('id', 'unknown')}>\n"
+                                        f"*Status:* Fix applied to `main` branch ✅"
+                                    ),
+                                },
+                            },
+                        ],
+                    }
+                else:
+                    updated_msg = {
+                        "replace_original": True,
+                        "blocks": [
+                            {
+                                "type": "header",
+                                "text": {"type": "plain_text", "text": "⚠️ Merge Failed"},
+                            },
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": (
+                                        f"*Build:* `{build_id}`\n"
+                                        f"*PR:* <{pr_url}|#{pr_number}>\n"
+                                        f"*Error:* Could not merge (status {resp.status_code})\n"
+                                        f"Please merge manually on GitHub."
+                                    ),
+                                },
+                            },
+                        ],
+                    }
+
+            elif action_id == "reject_fix":
+                resp = await client.patch(
+                    f"https://api.github.com/repos/{repo}/pulls/{pr_number}",
+                    headers=headers,
+                    json={"state": "closed"},
+                )
+                logger.info("slack_rejected build_id=%s pr=%d", build_id, pr_number)
+                updated_msg = {
+                    "replace_original": True,
+                    "blocks": [
+                        {
+                            "type": "header",
+                            "text": {"type": "plain_text", "text": "❌ Fix Rejected"},
+                        },
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": (
+                                    f"*Build:* `{build_id}`\n"
+                                    f"*PR:* <{pr_url}|#{pr_number}> — closed\n"
+                                    f"*Rejected by:* <@{payload.get('user', {}).get('id', 'unknown')}>\n"
+                                    f"*Next step:* Manual fix required 🔧"
+                                ),
+                            },
+                        },
+                    ],
+                }
+            else:
+                return web.Response(text="ok")
+
+            # Update the original Slack message via response_url
+            if response_url:
+                await client.post(
+                    response_url,
+                    json=updated_msg,
+                    headers={"Content-Type": "application/json"},
+                )
+
+        return web.Response(text="", status=200)
+
+    async def _merge_pr(
+        self,
+        client: httpx.AsyncClient,
+        repo: str,
+        pr_number: int,
+    ) -> None:
+        """Merge a GitHub PR automatically (GREEN path)."""
+        token = os.getenv("GITHUB_TOKEN", "")
+        if not token:
+            return
+        try:
+            resp = await client.put(
+                f"https://api.github.com/repos/{repo}/pulls/{pr_number}/merge",
+                headers={
+                    "Authorization": f"token {token}",
+                    "Accept": "application/vnd.github+json",
+                },
+                json={"merge_method": "squash"},
+            )
+            if resp.status_code == 200:
+                logger.info("pr_auto_merged repo=%s pr=%d", repo, pr_number)
+            else:
+                logger.warning("pr_merge_failed repo=%s pr=%d status=%d",
+                               repo, pr_number, resp.status_code)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning("pr_merge_error repo=%s pr=%d error=%s", repo, pr_number, exc)
 
     def _safe_fail(self, build_id: str, reason: str) -> None:
         """Mark workflow as FAILED, ignoring errors if already terminal."""
