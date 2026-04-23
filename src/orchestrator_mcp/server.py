@@ -22,11 +22,13 @@ from aiohttp import web
 from src.shared.audit_log import audit
 from src.shared.config import SERVICE_URLS
 from src.shared.cost_tracker import cost_tracker
+from src.shared.fix_memory import fix_memory
 from src.shared.mcp_base import MCPServiceBase
 from src.shared.models import WorkflowState, WorkflowStatus
 from src.shared.resilience import handle_agent_failure, trigger_global_fallback
 from src.shared.token_tracker import token_tracker
 from src.notification_mcp.slack_notifier import send_slack_review_buttons
+from src.notification_mcp.slack_slash_handler import handle_slash_command
 from src.orchestrator_mcp.deduplication import dedup_cache
 from src.orchestrator_mcp.rate_limiter import rate_limiter
 from src.orchestrator_mcp.workflow import (
@@ -75,6 +77,7 @@ class OrchestratorMCPServer(MCPServiceBase):
         self.app.router.add_get("/workflows/{build_id}",          self.get_workflow)
         self.app.router.add_post("/workflows/{build_id}/advance", self.advance_workflow)
         self.app.router.add_get("/api/stats",                     self.get_stats)
+        self.app.router.add_post("/webhooks/slack/commands",      handle_slash_command)
         # Start background pruner on app startup
         self.app.on_startup.append(self._start_pruner)
         self.app.on_cleanup.append(self._stop_pruner)
@@ -134,6 +137,13 @@ class OrchestratorMCPServer(MCPServiceBase):
         if not build_id or not raw_log:
             return web.json_response(
                 {"error": "build_id and raw_log are required"}, status=400
+            )
+
+        # --- Input size cap: reject payloads > 500 KB ---
+        if len(raw_log) > 500_000:
+            return web.json_response(
+                {"error": "raw_log exceeds 500 KB limit", "size": len(raw_log)},
+                status=413,
             )
 
         state = WorkflowState(build_id=build_id, status=WorkflowStatus.PENDING)
@@ -341,6 +351,22 @@ class OrchestratorMCPServer(MCPServiceBase):
             pr_url=pr_url,
         )
 
+        # Record fix outcome in AI memory so future prompts can learn from it
+        try:
+            fix_memory.record(
+                error_type=analysis["error_type"],
+                root_cause=analysis.get("root_cause", ""),
+                affected_files=analysis["affected_files"],
+                fix_patch=fix.get("fix_patch", ""),
+                outcome=colour,
+                confidence=fix.get("confidence", 0.0),
+                explanation=fix.get("explanation", ""),
+                build_id=build_id,
+                pr_url=pr_url,
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning("fix_memory_record_failed build_id=%s error=%s", build_id, exc)
+
         audit.log(
             "pipeline_complete",
             build_id=build_id,
@@ -476,6 +502,7 @@ class OrchestratorMCPServer(MCPServiceBase):
                     json={"merge_method": "squash"},
                 )
                 if resp.status_code == 200:
+                    fix_memory.update_outcome(build_id, approved=True)
                     audit.log("pr_approved", build_id=build_id, pr_number=pr_number,
                               repo=repo, approved_by=payload.get("user", {}).get("id"))
                     logger.info("slack_approved build_id=%s pr=%d", build_id, pr_number)
@@ -529,6 +556,7 @@ class OrchestratorMCPServer(MCPServiceBase):
                     headers=headers,
                     json={"state": "closed"},
                 )
+                fix_memory.update_outcome(build_id, approved=False)
                 audit.log("pr_rejected", build_id=build_id, pr_number=pr_number,
                           repo=repo, rejected_by=payload.get("user", {}).get("id"))
                 logger.info("slack_rejected build_id=%s pr=%d", build_id, pr_number)

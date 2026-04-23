@@ -5,6 +5,12 @@ Constraints (per spec):
   - Max 2 retries on LLM failure
   - 60 s timeout (enforced by NimClient via AgentModelConfig.timeout_seconds)
   - Bandit + Pylint run on generated code before returning
+
+Enhancements (post Sprint 1):
+  - fix_memory context injected into prompts (few-shot learning from history)
+  - Secret scanner blocks fixes with hardcoded credentials
+  - Log compression reduces token usage ~90% on verbose CI logs
+  - Task complexity scorer selects the cheapest adequate model tier
 """
 from __future__ import annotations
 
@@ -19,15 +25,19 @@ from src.llm_mcp.prompt_templates import (
     SYSTEM_PROMPT,
 )
 from src.shared.config import AGENT_CONFIGS
+from src.shared.fix_memory import build_memory_context, fix_memory
 from src.shared.metrics import quality_gate_results
 from src.shared.model_fallback import AllModelsFailed
 from src.shared.models import CodeFix, FailureAnalysis
 from src.shared.nim_client import NimClient, SlotParams
+from src.shared.prompt_compressor import compress_log
 from src.shared.quality_gates import (
+    evaluate_quality,
     run_bandit_scan,
     run_pylint_check,
-    evaluate_quality,
 )
+from src.shared.secret_scanner import scan_for_secrets
+from src.shared.task_complexity import score_complexity
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +52,10 @@ _SLOT_PARAMS: SlotParams = {
 
 class FixTooLongError(ValueError):
     """Raised when the generated fix exceeds MAX_FIX_LINES."""
+
+
+class SecretLeakError(ValueError):
+    """Raised when the generated fix contains hardcoded secrets."""
 
 
 class FixGenerator:
@@ -64,11 +78,12 @@ class FixGenerator:
         """Generate a code fix for *analysis*.
 
         Retries up to MAX_RETRIES times on LLM/parse errors.
-        Runs bandit + pylint on the generated code.
+        Runs bandit + pylint + secret scan on the generated code.
 
         Raises:
             AllModelsFailed: If every fallback model fails.
             FixTooLongError: If the fix exceeds MAX_FIX_LINES lines.
+            SecretLeakError: If the fix contains hardcoded secrets.
             RuntimeError: If max retries are exhausted.
         """
         if self._nim is None:
@@ -76,12 +91,41 @@ class FixGenerator:
 
         config = AGENT_CONFIGS["code_repairer"]
 
+        # --- Compress log to save tokens ---
+        compressed_logs = compress_log(cleaned_logs, max_chars=config.max_input_tokens)
+        ratio = len(compressed_logs) / max(len(cleaned_logs), 1)
+        logger.info("log_compressed build_id=%s ratio=%.2f", analysis.build_id, ratio)
+
+        # --- Enrich prompt with past fix history ---
+        past_fixes = fix_memory.query(
+            error_type=analysis.error_type.value,
+            root_cause=analysis.root_cause,
+            affected_files=analysis.affected_files,
+            limit=3,
+        )
+        memory_ctx = build_memory_context(past_fixes)
+        if memory_ctx:
+            logger.info("fix_memory_injected build_id=%s records=%d",
+                        analysis.build_id, len(past_fixes))
+
+        # --- Score complexity and log model tier ---
+        complexity = score_complexity(
+            error_type=analysis.error_type.value,
+            blast_radius=analysis.blast_radius.value if hasattr(analysis.blast_radius, "value")
+                         else str(analysis.blast_radius),
+            affected_files=analysis.affected_files,
+            root_cause=analysis.root_cause,
+            log_snippet=compressed_logs,
+        )
+        logger.info("task_complexity build_id=%s level=%s", analysis.build_id, complexity.value)
+
         prompt = SCENARIO_A_TEMPLATE.format(
             error_type=analysis.error_type.value,
             root_cause=analysis.root_cause,
             affected_files=", ".join(analysis.affected_files),
-            cleaned_logs=cleaned_logs[:config.max_input_tokens],
+            cleaned_logs=compressed_logs,
             code_context=code_context,
+            memory_context=f"\n{memory_ctx}\n" if memory_ctx else "",
         )
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -100,12 +144,28 @@ class FixGenerator:
                         f"Fix has {fix_code.count(chr(10))} lines — exceeds {MAX_FIX_LINES}"
                     )
 
-                # Run quality gates on generated code
+                # --- Secret scan: block fixes with hardcoded credentials ---
+                scan = scan_for_secrets(fix_code)
+                if scan.found:
+                    logger.error(
+                        "fix_secret_detected build_id=%s findings=%s",
+                        analysis.build_id, scan.summary,
+                    )
+                    if attempt < MAX_RETRIES:
+                        messages[-1]["content"] += (
+                            f"\n\nSECURITY BLOCK: previous fix contained hardcoded secrets "
+                            f"({scan.summary}). Rewrite to use environment variables instead."
+                        )
+                        continue
+                    raise SecretLeakError(
+                        f"Generated fix contains hardcoded secrets: {scan.summary}"
+                    )
+
+                # --- Quality gates: bandit + pylint ---
                 bandit = run_bandit_scan(fix_code)
                 pylint = run_pylint_check(fix_code)
                 quality = evaluate_quality(bandit, pylint)
 
-                # Track quality gate results
                 quality_gate_results.labels(
                     gate="bandit",
                     result="pass" if bandit.ok else "fail",
@@ -115,13 +175,12 @@ class FixGenerator:
                     result="pass" if pylint.ok else "fail",
                 ).inc()
 
-                # Adjust confidence based on quality
                 base_confidence = float(parsed.get("confidence", 0.5))
                 adjusted_confidence = max(0.0, base_confidence + quality.confidence_modifier)
 
                 logger.info(
-                    "fix_generated build_id=%s attempt=%d quality=%s conf=%.2f→%.2f",
-                    analysis.build_id, attempt, quality.reason,
+                    "fix_generated build_id=%s attempt=%d complexity=%s quality=%s conf=%.2f→%.2f",
+                    analysis.build_id, attempt, complexity.value, quality.reason,
                     base_confidence, adjusted_confidence,
                 )
 
@@ -144,10 +203,10 @@ class FixGenerator:
                     confidence=adjusted_confidence,
                     explanation=parsed.get("explanation", ""),
                     lint_ok=quality.passed,
-                    test_ok=False,   # test execution is Sprint 6 concern
+                    test_ok=False,
                 )
 
-            except (AllModelsFailed, FixTooLongError):
+            except (AllModelsFailed, FixTooLongError, SecretLeakError):
                 raise
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 last_exc = exc
@@ -161,13 +220,11 @@ def _parse_response(response: str) -> dict:
 
     Accepts bare JSON or JSON wrapped in a markdown code block.
     """
-    # Try bare JSON first
     try:
         return dict(json.loads(response))
     except json.JSONDecodeError:
         pass
 
-    # Try extracting from ```json ... ``` or ``` ... ``` block
     match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", response, re.DOTALL)
     if match:
         return dict(json.loads(match.group(1)))

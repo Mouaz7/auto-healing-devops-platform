@@ -37,7 +37,7 @@ Cleaned Build Logs:
 
 Code Context:
 {code_context}
-
+{memory_context}
 Generate a minimal fix for this bug."""
 
 SCENARIO_B_TEMPLATE = """\

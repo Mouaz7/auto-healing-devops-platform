@@ -28,13 +28,13 @@ class TestWithRetry:
 
     @pytest.mark.asyncio
     async def test_retries_on_failure_then_succeeds(self):
-        """Fails twice then succeeds on third attempt."""
+        """Fails twice (RuntimeError) then succeeds on third attempt."""
         attempt = {"count": 0}
 
         async def flaky():
             attempt["count"] += 1
             if attempt["count"] < 3:
-                raise ValueError("not yet")
+                raise RuntimeError("not yet")
             return "done"
 
         result = await with_retry(flaky, max_retries=3, delays=[0.0, 0.0, 0.0])

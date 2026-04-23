@@ -321,3 +321,37 @@ async def test_deduplication_blocks_repeat_error(orch_client):
     # Either deduplicated (BLOCKED) or processed normally — either is valid
     # depending on whether the error fingerprint matched
     assert body2["status"] in ("BLOCKED", "COMPLETED", "AWAITING_REVIEW")
+
+
+@pytest.mark.asyncio
+async def test_oversized_log_returns_413(orch_client):
+    """raw_log > 500 KB → 413 Payload Too Large."""
+    resp = await orch_client.post(
+        "/tools/handle_build_failure",
+        json={"build_id": "e2e-big", "raw_log": "x" * 600_000, "repo": "r/r"},
+    )
+    assert resp.status == 413
+    body = await resp.json()
+    assert "500 KB" in body["error"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fix_memory_recorded_after_green_pipeline(orch_client):
+    """After a GREEN pipeline run, fix_memory should contain one record."""
+    from src.shared.fix_memory import fix_memory
+
+    _setup_green(respx.mock)
+    resp = await orch_client.post(
+        "/tools/handle_build_failure",
+        json={"build_id": "e2e-mem-001", "raw_log": "FAILED tests/test_sample.py AssertionError", "repo": "r/r"},
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["colour"] == "GREEN"
+
+    # The orchestrator should have called fix_memory.record()
+    records = fix_memory.query("ASSERTION_ERROR", "AssertionError in test_calc", ["tests/test_sample.py"], limit=5)
+    # At least one record should exist for ASSERTION_ERROR (from the mocked analysis response)
+    all_records = fix_memory._load_records()
+    assert any(r.get("build_id") == "e2e-mem-001" for r in all_records)
