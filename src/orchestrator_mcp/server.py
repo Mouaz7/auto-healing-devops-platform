@@ -190,12 +190,15 @@ class OrchestratorMCPServer(MCPServiceBase):
         colour = verdict.get("status", "RED")
         pr_url = ""
 
+        # Prefer files from analysis; fall back to what the LLM identified
+        files_for_pr = analysis["affected_files"] or fix.get("files_to_modify", [])
+
         if colour == "GREEN" and verdict.get("auto_merge_allowed"):
             # Create PR and auto-merge so fix is traceable in GitHub
             if repo:
                 pr_url = await self._create_github_pr(
                     client, build_id, repo,
-                    fix["fix_patch"], analysis["affected_files"],
+                    fix["fix_patch"], files_for_pr,
                     auto_merge=True,
                 )
             self.engine.advance(build_id, WorkflowStatus.APPLYING_FIX)
@@ -207,7 +210,7 @@ class OrchestratorMCPServer(MCPServiceBase):
             if repo:
                 pr_data = await self._create_github_pr_with_number(
                     client, build_id, repo,
-                    fix["fix_patch"], analysis["affected_files"],
+                    fix["fix_patch"], files_for_pr,
                     auto_merge=False,
                 )
                 pr_url = pr_data.get("pr_url", "")

@@ -13,13 +13,16 @@ Rules:
 - Maximum 50 lines of changed code
 - Do NOT refactor unrelated code
 - Return JSON only, no markdown
+- "files_to_modify" MUST contain the actual file that needs to change (e.g. "tests/test_sample.py")
+  — look for it in "Affected Files", in FAILED/ERROR lines, or in the traceback.
+  Never leave this list empty and never use a placeholder like "auto_heal_fix.py".
 
 Output format:
 {
-  "fix_code": "the fixed code",
+  "fix_code": "the complete fixed content of the file",
   "confidence": 0.0-1.0,
   "explanation": "what was wrong and how it is fixed",
-  "files_to_modify": ["file1.py"],
+  "files_to_modify": ["tests/test_sample.py"],
   "estimated_blast_radius": "LOW|MEDIUM|HIGH"
 }"""
 

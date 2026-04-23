@@ -59,8 +59,11 @@ ERROR_PATTERNS: dict[ErrorType, list[re.Pattern[str]]] = {
     ],
 }
 
-# File paths mentioned in Python tracebacks
+# File paths from Python tracebacks: File "path/to/file.py", line N
 _FILE_PATH_RE = re.compile(r'File "([^"]+)", line \d+')
+
+# File paths from pytest output: FAILED tests/foo.py::test_bar or ERROR tests/foo.py
+_PYTEST_FILE_RE = re.compile(r'(?:FAILED|ERROR)\s+([\w./][^\s:]+\.py)', re.IGNORECASE)
 
 
 class FailureAnalyser:
@@ -118,8 +121,13 @@ class FailureAnalyser:
         return ErrorType.UNKNOWN
 
     def _extract_files(self, logs: str) -> list[str]:
-        """Extract unique file paths from Python tracebacks, preserving order."""
-        return list(dict.fromkeys(m.group(1) for m in _FILE_PATH_RE.finditer(logs)))
+        """Extract unique file paths from tracebacks and pytest output, preserving order."""
+        seen: dict[str, None] = {}
+        for m in _FILE_PATH_RE.finditer(logs):
+            seen[m.group(1)] = None
+        for m in _PYTEST_FILE_RE.finditer(logs):
+            seen[m.group(1)] = None
+        return list(seen)
 
     def _extract_stack_trace(self, logs: str) -> str:
         """Return lines from first traceback/error block onwards."""
