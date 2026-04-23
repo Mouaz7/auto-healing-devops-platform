@@ -19,12 +19,16 @@ import uuid
 import httpx
 from aiohttp import web
 
+from src.shared.audit_log import audit
 from src.shared.config import SERVICE_URLS
+from src.shared.cost_tracker import cost_tracker
 from src.shared.mcp_base import MCPServiceBase
 from src.shared.models import WorkflowState, WorkflowStatus
 from src.shared.resilience import handle_agent_failure, trigger_global_fallback
 from src.shared.token_tracker import token_tracker
 from src.notification_mcp.slack_notifier import send_slack_review_buttons
+from src.orchestrator_mcp.deduplication import dedup_cache
+from src.orchestrator_mcp.rate_limiter import rate_limiter
 from src.orchestrator_mcp.workflow import (
     WorkflowEngine,
     InvalidTransitionError,
@@ -115,6 +119,15 @@ class OrchestratorMCPServer(MCPServiceBase):
         except Exception:  # pylint: disable=broad-exception-caught
             return web.json_response({"error": "invalid JSON"}, status=400)
 
+        # --- Rate limiting: 10 requests / 60 s per client IP ---
+        client_ip = request.remote or "unknown"
+        if not rate_limiter.is_allowed(client_ip):
+            audit.log("rate_limit_blocked", client_ip=client_ip)
+            return web.json_response(
+                {"error": "rate_limit_exceeded", "retry_after_seconds": 60},
+                status=429,
+            )
+
         build_id = data.get("build_id", "")
         raw_log  = data.get("raw_log", "")
         repo     = data.get("repo", "")
@@ -132,6 +145,12 @@ class OrchestratorMCPServer(MCPServiceBase):
         # Generate a correlation ID so this pipeline run can be traced in logs
         # across all 6 agent services
         correlation_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        audit.log(
+            "pipeline_start",
+            build_id=build_id,
+            repo=repo,
+            correlation_id=correlation_id,
+        )
         logger.info(
             "pipeline_start build_id=%s correlation_id=%s repo=%s",
             build_id, correlation_id, repo,
@@ -146,6 +165,7 @@ class OrchestratorMCPServer(MCPServiceBase):
                 handle_agent_failure("orchestrator", build_id, str(exc))
                 self._safe_fail(build_id, str(exc))
                 await trigger_global_fallback("orchestrator", build_id, str(exc))
+                audit.log("pipeline_failed", build_id=build_id, error=str(exc))
                 return web.json_response(
                     {"build_id": build_id, "status": "FAILED", "error": str(exc)},
                     status=500,
@@ -245,6 +265,28 @@ class OrchestratorMCPServer(MCPServiceBase):
         if "status" not in verdict:
             raise ValueError(f"Agent 6 response missing 'status': {verdict}")
 
+        # Check deduplication cache — skip PR creation if identical error was
+        # processed recently and already produced a fix
+        dedup_hit = dedup_cache.check(
+            error_type=analysis["error_type"],
+            root_cause=analysis.get("root_cause", ""),
+            affected_files=analysis["affected_files"],
+        )
+        if dedup_hit:
+            audit.log("fix_deduplicated", build_id=build_id,
+                      original_build=dedup_hit.get("original_build"),
+                      colour=dedup_hit.get("colour"))
+            self.engine.advance(build_id, WorkflowStatus.BLOCKED)
+            return {
+                "build_id":      build_id,
+                "status":        "BLOCKED",
+                "colour":        dedup_hit.get("colour", "RED"),
+                "deduplicated":  True,
+                "original_build": dedup_hit.get("original_build"),
+                "cache_age_min": dedup_hit.get("cache_age_min"),
+                "message":       "Identical error was already processed recently.",
+            }
+
         # Advance to final state based on traffic light
         colour = verdict.get("status", "RED")
         pr_url = ""
@@ -288,6 +330,26 @@ class OrchestratorMCPServer(MCPServiceBase):
             self.engine.advance(build_id, WorkflowStatus.BLOCKED)
 
         final_status = self.engine.get(build_id).status.value
+
+        # Record in dedup cache so the same error isn't re-processed
+        dedup_cache.record(
+            error_type=analysis["error_type"],
+            root_cause=analysis.get("root_cause", ""),
+            affected_files=analysis["affected_files"],
+            build_id=build_id,
+            colour=colour,
+            pr_url=pr_url,
+        )
+
+        audit.log(
+            "pipeline_complete",
+            build_id=build_id,
+            colour=colour,
+            final_status=final_status,
+            final_score=verdict.get("final_score"),
+            pr_url=pr_url,
+            files=files_for_pr,
+        )
         logger.info(
             "pipeline_complete build_id=%s verdict=%s final=%s pr_url=%s",
             build_id, colour, final_status, pr_url,
@@ -414,6 +476,8 @@ class OrchestratorMCPServer(MCPServiceBase):
                     json={"merge_method": "squash"},
                 )
                 if resp.status_code == 200:
+                    audit.log("pr_approved", build_id=build_id, pr_number=pr_number,
+                              repo=repo, approved_by=payload.get("user", {}).get("id"))
                     logger.info("slack_approved build_id=%s pr=%d", build_id, pr_number)
                     updated_msg = {
                         "replace_original": True,
@@ -465,6 +529,8 @@ class OrchestratorMCPServer(MCPServiceBase):
                     headers=headers,
                     json={"state": "closed"},
                 )
+                audit.log("pr_rejected", build_id=build_id, pr_number=pr_number,
+                          repo=repo, rejected_by=payload.get("user", {}).get("id"))
                 logger.info("slack_rejected build_id=%s pr=%d", build_id, pr_number)
                 updated_msg = {
                     "replace_original": True,
@@ -679,23 +745,40 @@ class OrchestratorMCPServer(MCPServiceBase):
         return web.json_response({"build_id": build_id, "status": state.status.value})
 
     async def get_stats(self, _request: web.Request) -> web.Response:
-        """Return system-wide statistics useful for monitoring and thesis evaluation.
+        """Return system-wide statistics for monitoring and thesis evaluation.
 
-        Includes workflow status breakdown, token usage per agent, and
-        prune summary of stale/timed-out workflows triggered on demand.
+        Covers:
+        - Workflow status breakdown (active / completed / blocked / failed)
+        - Token usage per agent this hour
+        - Estimated API cost this session
+        - Deduplication cache size
+        - Rate limiter activity
+        - Audit log event summary
         """
         workflow_counts = self.engine.stats()
         prune_result = self.engine.prune_stale()
         token_snapshot = token_tracker.usage_snapshot()
+        cost_summary = cost_tracker.session_summary()
 
         return web.json_response({
             "workflows": {
-                "by_status": workflow_counts,
-                "total": sum(workflow_counts.values()),
-                "active": len(self.engine.list_active()),
+                "by_status":        workflow_counts,
+                "total":            sum(workflow_counts.values()),
+                "active":           len(self.engine.list_active()),
                 "pruned_this_call": prune_result,
             },
             "tokens_used_this_hour": token_snapshot,
+            "cost":                  cost_summary,
+            "deduplication": {
+                "cache_size":        dedup_cache.size(),
+            },
+            "rate_limiter": {
+                "active_keys":       rate_limiter.stats(),
+            },
+            "audit_log": {
+                "event_counts":      audit.summary(),
+                "recent_events":     audit.tail(n=10),
+            },
         })
 
 

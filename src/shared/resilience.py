@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -188,16 +189,23 @@ circuit_breakers: dict[str, CircuitBreaker] = {
 # Retry helper
 # ---------------------------------------------------------------------------
 
-async def with_retry(coro_fn: Callable[[], Awaitable[T]],
-                     max_retries: int = 3,
-                     delays: list[float] | None = None) -> T:
-    """Run a coroutine with exponential backoff retry.
+async def with_retry(
+    coro_fn: Callable[[], Awaitable[T]],
+    max_retries: int = 3,
+    delays: list[float] | None = None,
+    jitter: float = 0.25,
+) -> T:
+    """Run a coroutine with exponential backoff retry + jitter.
+
+    Jitter (±jitter * delay) prevents the thundering-herd problem where many
+    services retry simultaneously after a shared dependency recovers.
 
     Args:
         coro_fn: Zero-argument async callable to retry.
         max_retries: Maximum number of retries (default 3).
-        delays: Seconds between attempts (default [1, 2, 4]).
+        delays: Base seconds between attempts (default [1, 2, 4]).
                 Last value is reused if attempts exceed list length.
+        jitter: Fraction of delay to randomise (default ±25%).
 
     Returns:
         Result of coro_fn on success.
@@ -212,14 +220,16 @@ async def with_retry(coro_fn: Callable[[], Awaitable[T]],
     for attempt in range(max_retries + 1):
         try:
             return await coro_fn()
-        except Exception as exc:  # pylint: disable=broad-exception-caught
+        except (httpx.HTTPError, httpx.TimeoutException, OSError, RuntimeError) as exc:
             last_error = exc
             if attempt < max_retries:
-                delay = delays[min(attempt, len(delays) - 1)]
+                base = delays[min(attempt, len(delays) - 1)]
+                # Full jitter: uniform(base*(1-jitter), base*(1+jitter))
+                sleep_for = base * (1.0 + random.uniform(-jitter, jitter))
                 logger.warning(
-                    "retry attempt=%d/%d delay=%.1fs error=%s",
-                    attempt + 1, max_retries, delay, exc,
+                    "retry attempt=%d/%d sleep=%.2fs error=%s",
+                    attempt + 1, max_retries, sleep_for, exc,
                 )
-                await asyncio.sleep(delay)
+                await asyncio.sleep(sleep_for)
 
     raise last_error  # type: ignore[misc]
