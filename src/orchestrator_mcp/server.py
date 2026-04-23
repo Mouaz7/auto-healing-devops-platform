@@ -3,24 +3,27 @@
 Sprint 2: state machine skeleton.
 Sprint 3: full Agent 1→3→4→5→6 pipeline chain.
 Sprint 4: GitHub PR approval — YELLOW creates a PR, webhook advances workflow.
+Sprint 5+: correlation IDs, defensive validation, stats endpoint, pruning.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
+import json
 import logging
 import os
+import urllib.parse
+import uuid
 
 import httpx
 from aiohttp import web
-
-import json
-import urllib.parse
 
 from src.shared.config import SERVICE_URLS
 from src.shared.mcp_base import MCPServiceBase
 from src.shared.models import WorkflowState, WorkflowStatus
 from src.shared.resilience import handle_agent_failure, trigger_global_fallback
+from src.shared.token_tracker import token_tracker
 from src.notification_mcp.slack_notifier import send_slack_review_buttons
 from src.orchestrator_mcp.workflow import (
     WorkflowEngine,
@@ -33,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT = 180.0   # seconds per agent call (LLM can be slow)
 _GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
+# How often the background pruner runs (seconds)
+_PRUNE_INTERVAL = 3600
 
 
 class OrchestratorMCPServer(MCPServiceBase):
@@ -53,6 +58,7 @@ class OrchestratorMCPServer(MCPServiceBase):
     def __init__(self) -> None:
         super().__init__("orchestrator_mcp", 8085)
         self.engine = WorkflowEngine()
+        self._prune_task: asyncio.Task | None = None
 
     async def setup_routes(self) -> None:
         """Register orchestrator-specific routes on self.app."""
@@ -64,6 +70,31 @@ class OrchestratorMCPServer(MCPServiceBase):
         self.app.router.add_get("/workflows/active",              self.list_active)
         self.app.router.add_get("/workflows/{build_id}",          self.get_workflow)
         self.app.router.add_post("/workflows/{build_id}/advance", self.advance_workflow)
+        self.app.router.add_get("/api/stats",                     self.get_stats)
+        # Start background pruner on app startup
+        self.app.on_startup.append(self._start_pruner)
+        self.app.on_cleanup.append(self._stop_pruner)
+
+    async def _start_pruner(self, _app: web.Application) -> None:
+        self._prune_task = asyncio.create_task(self._prune_loop())
+
+    async def _stop_pruner(self, _app: web.Application) -> None:
+        if self._prune_task:
+            self._prune_task.cancel()
+            try:
+                await self._prune_task
+            except asyncio.CancelledError:
+                pass
+
+    async def _prune_loop(self) -> None:
+        """Background task: prune stale workflows every hour."""
+        while True:
+            await asyncio.sleep(_PRUNE_INTERVAL)
+            try:
+                result = self.engine.prune_stale()
+                logger.info("prune_loop result=%s", result)
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.error("prune_loop_error error=%s", exc)
 
     # ------------------------------------------------------------------
     # Full pipeline — Agent 1→3→4→5→6
@@ -98,9 +129,19 @@ class OrchestratorMCPServer(MCPServiceBase):
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=409)
 
+        # Generate a correlation ID so this pipeline run can be traced in logs
+        # across all 6 agent services
+        correlation_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        logger.info(
+            "pipeline_start build_id=%s correlation_id=%s repo=%s",
+            build_id, correlation_id, repo,
+        )
+
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             try:
-                result = await self._run_pipeline(client, build_id, raw_log, repo)
+                result = await self._run_pipeline(
+                    client, build_id, raw_log, repo, correlation_id
+                )
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 handle_agent_failure("orchestrator", build_id, str(exc))
                 self._safe_fail(build_id, str(exc))
@@ -118,24 +159,36 @@ class OrchestratorMCPServer(MCPServiceBase):
         build_id: str,
         raw_log: str,
         repo: str = "",
+        correlation_id: str = "",
     ) -> dict:
         """Execute the full 4-step pipeline and return the final result dict."""
+        # Propagate correlation ID to all downstream agents so a single
+        # build_id can be traced across log lines from different services
+        extra_headers = {"X-Request-ID": correlation_id} if correlation_id else {}
+
         # Step 1: Agent 3 — clean logs
         self.engine.advance(build_id, WorkflowStatus.ANALYSING)
         clean_resp = await client.post(
             f"{SERVICE_URLS['log_cleaner']}/tools/clean_logs",
             json={"build_id": build_id, "raw_log": raw_log},
+            headers=extra_headers,
         )
         clean_resp.raise_for_status()
         cleaned = clean_resp.json()
+        if "cleaned_logs" not in cleaned:
+            raise ValueError(f"Agent 3 response missing 'cleaned_logs': {cleaned}")
 
         # Step 2: Agent 4 — analyze failure
         analyse_resp = await client.post(
             f"{SERVICE_URLS['knowledge_graph']}/tools/analyze_failure",
             json={"build_id": build_id, "cleaned_logs": cleaned["cleaned_logs"]},
+            headers=extra_headers,
         )
         analyse_resp.raise_for_status()
         analysis = analyse_resp.json()
+        for required in ("error_type", "blast_radius", "affected_files", "confidence", "root_cause"):
+            if required not in analysis:
+                raise ValueError(f"Agent 4 response missing '{required}': {analysis}")
 
         # Step 2b: Gerrit MCP — fetch code context for affected files (max 3)
         code_context = ""
@@ -165,9 +218,12 @@ class OrchestratorMCPServer(MCPServiceBase):
                 "cleaned_logs":   cleaned["cleaned_logs"],
                 "code_context":   code_context,
             },
+            headers=extra_headers,
         )
         fix_resp.raise_for_status()
         fix = fix_resp.json()
+        if "fix_patch" not in fix or "confidence" not in fix:
+            raise ValueError(f"Agent 5 response missing required fields: {fix}")
 
         # Step 4: Agent 6 — traffic light + notify
         self.engine.advance(build_id, WorkflowStatus.VALIDATING)
@@ -182,9 +238,12 @@ class OrchestratorMCPServer(MCPServiceBase):
                 "blast_radius":   analysis["blast_radius"],
                 "affected_files": analysis["affected_files"],
             },
+            headers=extra_headers,
         )
         notify_resp.raise_for_status()
         verdict = notify_resp.json()
+        if "status" not in verdict:
+            raise ValueError(f"Agent 6 response missing 'status': {verdict}")
 
         # Advance to final state based on traffic light
         colour = verdict.get("status", "RED")
@@ -618,6 +677,26 @@ class OrchestratorMCPServer(MCPServiceBase):
         except WorkflowNotFoundError:
             return web.json_response({"error": "not found"}, status=404)
         return web.json_response({"build_id": build_id, "status": state.status.value})
+
+    async def get_stats(self, _request: web.Request) -> web.Response:
+        """Return system-wide statistics useful for monitoring and thesis evaluation.
+
+        Includes workflow status breakdown, token usage per agent, and
+        prune summary of stale/timed-out workflows triggered on demand.
+        """
+        workflow_counts = self.engine.stats()
+        prune_result = self.engine.prune_stale()
+        token_snapshot = token_tracker.usage_snapshot()
+
+        return web.json_response({
+            "workflows": {
+                "by_status": workflow_counts,
+                "total": sum(workflow_counts.values()),
+                "active": len(self.engine.list_active()),
+                "pruned_this_call": prune_result,
+            },
+            "tokens_used_this_hour": token_snapshot,
+        })
 
 
 def _serialise(state: WorkflowState) -> dict:

@@ -8,6 +8,10 @@ Flow:
 
 The branch name encodes the build_id so the orchestrator's GitHub webhook
 can recover the build_id when the PR is merged/approved.
+
+Rate-limit handling:
+  When GitHub returns 403 with a Retry-After or X-RateLimit-Reset header,
+  the client waits the indicated seconds before retrying (capped at 60 s).
 """
 from __future__ import annotations
 
@@ -15,6 +19,7 @@ import asyncio
 import base64
 import logging
 import os
+import time
 
 import httpx
 
@@ -22,7 +27,26 @@ logger = logging.getLogger(__name__)
 
 _GITHUB_API = "https://api.github.com"
 _MAX_RETRIES = 3
-_RETRY_DELAYS = [1.0, 2.0, 4.0]  # exponential backoff
+_RETRY_DELAYS = [1.0, 2.0, 4.0]  # exponential backoff (seconds)
+_MAX_RATE_LIMIT_WAIT = 60.0       # never wait more than 60 s for rate-limit recovery
+
+
+def _rate_limit_wait(response: httpx.Response) -> float:
+    """Return how many seconds to wait after a 403/429 rate-limit response."""
+    retry_after = response.headers.get("Retry-After")
+    if retry_after:
+        try:
+            return min(float(retry_after), _MAX_RATE_LIMIT_WAIT)
+        except ValueError:
+            pass
+    reset_ts = response.headers.get("X-RateLimit-Reset")
+    if reset_ts:
+        try:
+            wait = float(reset_ts) - time.time()
+            return min(max(wait, 0.0), _MAX_RATE_LIMIT_WAIT)
+        except ValueError:
+            pass
+    return 5.0  # safe default when no header is present
 
 
 class PatchSubmitter:
@@ -94,10 +118,22 @@ class PatchSubmitter:
                         "branch":    branch,
                     }
             except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 422:
-                    # Branch already exists — treat as success if PR exists
+                status = exc.response.status_code
+                if status == 422:
+                    # Branch already exists — find the existing PR instead of
+                    # returning empty data which would break the Slack buttons
                     logger.warning("branch_exists build_id=%s attempt=%d", build_id, attempt)
-                    return {"pr_url": "", "pr_number": 0, "branch": branch}
+                    existing = await self._find_existing_pr(repo, branch, base_branch)
+                    return existing or {"pr_url": "", "pr_number": 0, "branch": branch}
+                if status in (403, 429):
+                    # GitHub rate limit — respect the Retry-After / X-RateLimit-Reset header
+                    wait = _rate_limit_wait(exc.response)
+                    logger.warning(
+                        "github_rate_limited build_id=%s status=%d wait=%.1fs",
+                        build_id, status, wait,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
                 if attempt < _MAX_RETRIES - 1:
                     await asyncio.sleep(_RETRY_DELAYS[attempt])
                 else:
@@ -108,6 +144,36 @@ class PatchSubmitter:
     # ------------------------------------------------------------------
     # Private GitHub API helpers
     # ------------------------------------------------------------------
+
+    async def _find_existing_pr(
+        self,
+        repo: str,
+        head_branch: str,
+        base_branch: str,
+    ) -> dict | None:
+        """Look up an open PR for *head_branch* → *base_branch*.
+
+        Called when branch creation returns 422 (branch already exists) so we
+        can return real PR data instead of an empty dict.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=10, headers=self._headers) as client:
+                resp = await client.get(
+                    f"{_GITHUB_API}/repos/{repo}/pulls",
+                    params={"head": f"{repo.split('/')[0]}:{head_branch}", "base": base_branch, "state": "open"},
+                )
+                if resp.status_code == 200:
+                    pulls = resp.json()
+                    if pulls:
+                        pr = pulls[0]
+                        return {
+                            "pr_url":    pr["html_url"],
+                            "pr_number": pr["number"],
+                            "branch":    head_branch,
+                        }
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        return None
 
     async def _get_base_sha(
         self, client: httpx.AsyncClient, repo: str, branch: str
