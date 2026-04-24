@@ -20,19 +20,20 @@ jobs:
 
       - name: Run tests
         id: run_tests
-        run: |
-          python -m pytest tests/ -v || true
+        run: python -m pytest tests/ -v 2>&1 | tee /tmp/pytest_output.txt
+        continue-on-error: true
 
       - name: Trigger Auto-Healing on failure
-        if: failure()
+        if: steps.run_tests.outcome == 'failure'
         run: |
+          LOG=$(cat /tmp/pytest_output.txt | head -c 400000)
           curl -X POST https://washhouse-shopper-retry.ngrok-free.dev/tools/handle_build_failure \
             -H "Content-Type: application/json" \
-            -d '{
-              "build_id": "${{ github.run_id }}",
-              "repo": "${{ github.repository }}",
-              "branch": "${{ github.ref_name }}",
-              "scenario": "A",
-              "raw_log": "Build failed on commit ${{ github.sha }}"
-            }'
+            -d "{
+              \"build_id\": \"${{ github.run_id }}\",
+              \"repo\": \"${{ github.repository }}\",
+              \"branch\": \"${{ github.ref_name }}\",
+              \"scenario\": \"A\",
+              \"raw_log\": $(echo "$LOG" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+            }"
           echo "Auto-healing triggered!"
