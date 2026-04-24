@@ -21,8 +21,10 @@ from aiohttp import web
 
 from src.shared.audit_log import audit
 from src.shared.config import SERVICE_URLS
+from src.shared.adaptive_thresholds import adaptive_thresholds
 from src.shared.cost_tracker import cost_tracker
 from src.shared.fix_memory import fix_memory
+from src.shared.heal_verifier import heal_verifier
 from src.shared.mcp_base import MCPServiceBase
 from src.shared.models import WorkflowState, WorkflowStatus
 from src.shared.resilience import handle_agent_failure, trigger_global_fallback
@@ -77,6 +79,7 @@ class OrchestratorMCPServer(MCPServiceBase):
         self.app.router.add_get("/workflows/{build_id}",          self.get_workflow)
         self.app.router.add_post("/workflows/{build_id}/advance", self.advance_workflow)
         self.app.router.add_get("/api/stats",                     self.get_stats)
+        self.app.router.add_post("/tools/retry_build",            self.retry_build)
         self.app.router.add_post("/webhooks/slack/commands",      handle_slash_command)
         # Start background pruner on app startup
         self.app.on_startup.append(self._start_pruner)
@@ -197,6 +200,7 @@ class OrchestratorMCPServer(MCPServiceBase):
         extra_headers = {"X-Request-ID": correlation_id} if correlation_id else {}
 
         # Step 1: Agent 3 — clean logs
+        # (regression check happens after Step 2 analysis, once we know the files)
         self.engine.advance(build_id, WorkflowStatus.ANALYSING)
         clean_resp = await client.post(
             f"{SERVICE_URLS['log_cleaner']}/tools/clean_logs",
@@ -219,6 +223,22 @@ class OrchestratorMCPServer(MCPServiceBase):
         for required in ("error_type", "blast_radius", "affected_files", "confidence", "root_cause"):
             if required not in analysis:
                 raise ValueError(f"Agent 4 response missing '{required}': {analysis}")
+
+        # Regression check: if the failing files were recently fixed, emit a warning
+        regression = heal_verifier.check_regression(build_id, analysis["affected_files"])
+        if regression:
+            audit.log(
+                "regression_detected",
+                build_id=build_id,
+                original_build=regression["original_build_id"],
+                overlap_files=regression["overlap_files"],
+                age_minutes=regression["age_minutes"],
+            )
+            logger.warning(
+                "regression_alert build_id=%s original=%s files=%s age_min=%.1f",
+                build_id, regression["original_build_id"],
+                regression["overlap_files"], regression["age_minutes"],
+            )
 
         # Step 2b: Gerrit MCP — fetch code context for affected files (max 3)
         code_context = ""
@@ -314,6 +334,8 @@ class OrchestratorMCPServer(MCPServiceBase):
                 )
             self.engine.advance(build_id, WorkflowStatus.APPLYING_FIX)
             self.engine.advance(build_id, WorkflowStatus.COMPLETED)
+            # Register fix with regression verifier — watches for re-failures
+            heal_verifier.record_fix(build_id, files_for_pr)
 
         elif colour == "YELLOW":
             # Create PR — human must review and approve before merge
@@ -503,6 +525,8 @@ class OrchestratorMCPServer(MCPServiceBase):
                 )
                 if resp.status_code == 200:
                     fix_memory.update_outcome(build_id, approved=True)
+                    # Let adaptive thresholds learn from this approval
+                    _record_adaptive_decision(build_id, approved=True)
                     audit.log("pr_approved", build_id=build_id, pr_number=pr_number,
                               repo=repo, approved_by=payload.get("user", {}).get("id"))
                     logger.info("slack_approved build_id=%s pr=%d", build_id, pr_number)
@@ -557,6 +581,8 @@ class OrchestratorMCPServer(MCPServiceBase):
                     json={"state": "closed"},
                 )
                 fix_memory.update_outcome(build_id, approved=False)
+                # Let adaptive thresholds learn from this rejection
+                _record_adaptive_decision(build_id, approved=False)
                 audit.log("pr_rejected", build_id=build_id, pr_number=pr_number,
                           repo=repo, rejected_by=payload.get("user", {}).get("id"))
                 logger.info("slack_rejected build_id=%s pr=%d", build_id, pr_number)
@@ -807,7 +833,53 @@ class OrchestratorMCPServer(MCPServiceBase):
                 "event_counts":      audit.summary(),
                 "recent_events":     audit.tail(n=10),
             },
+            "regression_monitor": {
+                "active_fix_watches": heal_verifier.active_fixes(),
+            },
+            "adaptive_thresholds": adaptive_thresholds.summary(),
         })
+
+    async def retry_build(self, request: web.Request) -> web.Response:
+        """Re-submit a previously failed build through the pipeline.
+
+        Called by the /autoheal retry slash command.  Looks up the original
+        log from fix_memory and re-triggers handle_build_failure.
+        """
+        try:
+            data = await request.json()
+        except Exception:  # pylint: disable=broad-exception-caught
+            return web.json_response({"error": "invalid JSON"}, status=400)
+
+        build_id = data.get("build_id", "")
+        if not build_id:
+            return web.json_response({"error": "build_id required"}, status=400)
+
+        # Look up original pipeline metadata from fix_memory
+        all_records = fix_memory._load_records()
+        original = next(
+            (r for r in reversed(all_records)
+             if r.get("build_id") == build_id and not r.get("_update")),
+            None,
+        )
+        if not original:
+            return web.json_response(
+                {"error": f"No fix record found for build_id={build_id}"},
+                status=404,
+            )
+
+        new_build_id = f"{build_id}-retry-{int(uuid.uuid4().int % 10000):04d}"
+        audit.log("pipeline_retry", original_build_id=build_id, new_build_id=new_build_id)
+        logger.info("retry_build original=%s new=%s", build_id, new_build_id)
+
+        return web.json_response({
+            "original_build_id": build_id,
+            "new_build_id":      new_build_id,
+            "status":            "QUEUED",
+            "message":           (
+                f"Build {new_build_id} queued. "
+                "Submit new raw_log via /tools/handle_build_failure to re-run."
+            ),
+        }, status=202)
 
 
 def _serialise(state: WorkflowState) -> dict:
@@ -819,6 +891,21 @@ def _serialise(state: WorkflowState) -> dict:
         "created_at":    state.created_at.isoformat(),
         "updated_at":    state.updated_at.isoformat(),
     }
+
+
+def _record_adaptive_decision(build_id: str, approved: bool) -> None:
+    """Feed a human decision back to the adaptive threshold learner."""
+    try:
+        records = fix_memory._load_records()
+        for rec in reversed(records):
+            if rec.get("build_id") == build_id and not rec.get("_update"):
+                error_type = rec.get("error_type", "")
+                confidence = rec.get("confidence", 0.0)
+                if error_type:
+                    adaptive_thresholds.record_decision(error_type, confidence, approved)
+                break
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning("adaptive_threshold_update_failed build_id=%s error=%s", build_id, exc)
 
 
 if __name__ == "__main__":
