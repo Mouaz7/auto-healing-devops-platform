@@ -34,9 +34,40 @@ _BAD_FILENAMES = {
     "example.py", "auto_heal_fix.py", "file.py",
 }
 
+# Critical paths that auto-heal MUST NEVER modify.
+# Modifying these creates infrastructure failures: workflow loops, broken CI,
+# overwritten dependencies. AI fixes belong in application code only.
+_PROTECTED_PATH_PREFIXES = (
+    ".github/",          # CI workflow files — overwriting these breaks auto-heal itself
+    ".gitlab/",
+    ".circleci/",
+    ".azure/",
+    ".husky/",
+    "Dockerfile",
+    "docker-compose",
+    "Makefile",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "package.json",
+    "package-lock.json",
+    "requirements.txt",
+    "Pipfile",
+    "poetry.lock",
+    ".env",
+    ".gitignore",
+    "LICENSE",
+)
+
+
+def _is_protected_path(path: str) -> bool:
+    """Return True for paths the AI must never modify (CI, deps, infra)."""
+    p = path.lstrip("./").lower()
+    return any(p.startswith(prefix.lower()) for prefix in _PROTECTED_PATH_PREFIXES)
+
 
 def _sanitize_files(files: list[str]) -> list[str]:
-    """Drop empty, hallucinated, or non-Python paths."""
+    """Drop empty, hallucinated, protected, or non-Python paths."""
     result: list[str] = []
     for f in files or []:
         if not f:
@@ -47,6 +78,9 @@ def _sanitize_files(files: list[str]) -> list[str]:
         if f.startswith("<") or f.startswith("("):
             continue
         if any(c in f for c in "<>()[]{}"):
+            continue
+        if _is_protected_path(f):
+            logger.warning("rejecting protected path from AI fix: %s", f)
             continue
         if not f.endswith(".py"):
             continue
