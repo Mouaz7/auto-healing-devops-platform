@@ -65,6 +65,7 @@ class OrchestratorMCPServer(MCPServiceBase):
 
     def __init__(self) -> None:
         super().__init__("orchestrator_mcp", 8085)
+        self._port = 8085
         self.engine = WorkflowEngine()
         self._prune_task: asyncio.Task | None = None
 
@@ -80,6 +81,7 @@ class OrchestratorMCPServer(MCPServiceBase):
         self.app.router.add_post("/workflows/{build_id}/advance", self.advance_workflow)
         self.app.router.add_get("/api/stats",                     self.get_stats)
         self.app.router.add_post("/tools/retry_build",            self.retry_build)
+        self.app.router.add_post("/tools/review_code",            self.review_code)
         self.app.router.add_post("/webhooks/slack/commands",      handle_slash_command)
         # Start background pruner on app startup
         self.app.on_startup.append(self._start_pruner)
@@ -880,6 +882,111 @@ class OrchestratorMCPServer(MCPServiceBase):
                 "Submit new raw_log via /tools/handle_build_failure to re-run."
             ),
         }, status=202)
+
+
+    async def review_code(self, request: web.Request) -> web.Response:
+        """AI-powered code review for logic bugs — no crash needed to trigger healing.
+
+        POST /tools/review_code
+        Body: {"file_path": "foo.py", "code": "...", "repo": "...", "build_id": "..."}
+
+        Sends code to Agent 4 (LLM analysis) and returns whether a bug was found.
+        If a bug is found, automatically triggers handle_build_failure.
+        """
+        try:
+            data = await request.json()
+        except Exception:  # pylint: disable=broad-exception-caught
+            return web.json_response({"error": "invalid JSON"}, status=400)
+
+        file_path = data.get("file_path", "")
+        code = data.get("code", "")
+        repo = data.get("repo", "")
+        build_id = data.get("build_id", str(uuid.uuid4())[:8])
+
+        if not code or not file_path:
+            return web.json_response({"error": "file_path and code required"}, status=400)
+
+        # Ask Agent 4 (LLM) to review the code for any bug — crash or not
+        review_prompt = (
+            f"Review this Python code for bugs. Look for: logic errors, wrong variable names, "
+            f"incorrect operators, off-by-one errors, wrong conditions, etc.\n\n"
+            f"File: {file_path}\n\n```python\n{code}\n```\n\n"
+            f"Respond with JSON only:\n"
+            f'{{"has_bug": true/false, "error_type": "LOGIC_ERROR|NAME_ERROR|...", '
+            f'"description": "what is wrong and on which line", "line": <line_number>}}'
+        )
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{SERVICE_URLS['knowledge_graph']}/tools/analyze_failure",
+                    json={"cleaned_logs": review_prompt, "build_id": build_id},
+                )
+                analysis = resp.json()
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning("review_code agent4_failed file=%s err=%s", file_path, exc)
+            return web.json_response({"has_bug": False, "reason": "agent unavailable"})
+
+        # Parse the LLM's review response from root_cause field
+        root_cause = analysis.get("root_cause", "")
+        has_bug = False
+        bug_description = ""
+
+        # Try to parse structured response from LLM
+        try:
+            import re as _re
+            json_match = _re.search(r'\{[^{}]+\}', root_cause)
+            if json_match:
+                review = json.loads(json_match.group())
+                has_bug = review.get("has_bug", False)
+                bug_description = review.get("description", root_cause)
+        except Exception:  # pylint: disable=broad-exception-caught
+            # Fallback: look for keywords indicating a bug
+            bug_keywords = ["wrong", "incorrect", "error", "bug", "should be", "instead of"]
+            has_bug = any(kw in root_cause.lower() for kw in bug_keywords)
+            bug_description = root_cause
+
+        if not has_bug:
+            return web.json_response({"has_bug": False, "file": file_path})
+
+        # Bug found — trigger the full healing pipeline
+        logger.info("review_code bug_found file=%s desc=%s", file_path, bug_description)
+        audit.log("code_review_bug_found", file=file_path, description=bug_description)
+
+        synthetic_log = (
+            f"FAILED_FILE: {file_path}\n"
+            f"ERROR_TYPE: LOGIC_ERROR\n"
+            f"AI Code Review detected a bug: {bug_description}\n\n"
+            f"FILE_CONTENT_START: {file_path}\n{code}\nFILE_CONTENT_END"
+        )
+
+        # Fire-and-forget: submit to the healing pipeline
+        asyncio.create_task(self._trigger_healing_for_review(
+            build_id=f"review-{build_id}",
+            repo=repo,
+            raw_log=synthetic_log,
+        ))
+
+        return web.json_response({
+            "has_bug": True,
+            "file": file_path,
+            "description": bug_description,
+            "healing_triggered": True,
+        })
+
+    async def _trigger_healing_for_review(
+        self, build_id: str, repo: str, raw_log: str
+    ) -> None:
+        """Submit a code-review-detected bug to the main healing pipeline."""
+        try:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+                await client.post(
+                    f"http://localhost:{self._port}/tools/handle_build_failure",
+                    json={"build_id": build_id, "repo": repo,
+                          "branch": "main", "scenario": "A", "raw_log": raw_log},
+                )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.error("review_healing_trigger_failed build_id=%s err=%s", build_id, exc)
 
 
 def _serialise(state: WorkflowState) -> dict:
