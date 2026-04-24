@@ -25,6 +25,34 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Hallucinated / placeholder filenames that LLMs sometimes emit when they
+# can't identify a real file. We refuse to create PRs against these — the
+# filename would end up literally committed to the branch.
+_BAD_FILENAMES = {
+    "<unknown>", "(unknown)", "unknown", "unknown.py",
+    "<file>", "<filename>", "<path>", "placeholder.py",
+    "example.py", "auto_heal_fix.py", "file.py",
+}
+
+
+def _sanitize_files(files: list[str]) -> list[str]:
+    """Drop empty, hallucinated, or non-Python paths."""
+    result: list[str] = []
+    for f in files or []:
+        if not f:
+            continue
+        f = f.strip()
+        if f.lower() in _BAD_FILENAMES:
+            continue
+        if f.startswith("<") or f.startswith("("):
+            continue
+        if any(c in f for c in "<>()[]{}"):
+            continue
+        if not f.endswith(".py"):
+            continue
+        result.append(f.lstrip("./"))
+    return result
+
 _GITHUB_API = "https://api.github.com"
 _MAX_RETRIES = 3
 _RETRY_DELAYS = [1.0, 2.0, 4.0]  # exponential backoff (seconds)
@@ -92,15 +120,19 @@ class PatchSubmitter:
         branch = f"auto-heal/{build_id}"
         pr_title = title or f"[auto-heal] Fix for build {build_id}"
 
-        # If no affected files, REFUSE to create a PR rather than guess a fake filename.
-        # This prevents bogus commits like "auto_heal_fix.py" that confuse users.
-        if not affected_files:
+        # Filter out hallucinated filenames like "<unknown>" that LLMs emit when
+        # they can't name a real file. Without this the branch would literally
+        # contain a file called "<unknown>".
+        sanitized = _sanitize_files(affected_files)
+        if not sanitized:
             logger.error(
-                "create_pr rejected — no affected files identified (build_id=%s)", build_id,
+                "create_pr rejected — no valid affected files (build_id=%s input=%s)",
+                build_id, affected_files,
             )
             return {"pr_url": "", "pr_number": 0, "branch": "", "error": "no_target_file"}
 
-        file_path = affected_files[0]
+        file_path = sanitized[0]
+        affected_files = sanitized
 
         for attempt in range(_MAX_RETRIES):
             try:

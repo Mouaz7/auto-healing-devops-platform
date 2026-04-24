@@ -272,6 +272,18 @@ class OrchestratorMCPServer(MCPServiceBase):
             },
             headers=extra_headers,
         )
+        # 422 = structurally unrecoverable (empty code_context, secret leak, etc.).
+        # Route to human review instead of crashing the pipeline.
+        if fix_resp.status_code == 422:
+            err = fix_resp.json()
+            self.engine.advance(build_id, WorkflowStatus.BLOCKED)
+            return {
+                "build_id": build_id,
+                "status":   "BLOCKED",
+                "colour":   "RED",
+                "reason":   err.get("reason", "fix_rejected"),
+                "message":  err.get("error", "Fix generation rejected"),
+            }
         fix_resp.raise_for_status()
         fix = fix_resp.json()
         if "fix_patch" not in fix or "confidence" not in fix:

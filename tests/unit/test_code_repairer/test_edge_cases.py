@@ -45,7 +45,7 @@ class TestFixTooLong:
         with pytest.raises(FixTooLongError):
             generator.generate_fix(
                 analysis=_analysis(),
-                code_context="",
+                code_context="def foo():\n    pass\n",
                 cleaned_logs="ImportError",
             )
 
@@ -60,7 +60,7 @@ class TestAllModelsFailed:
         with pytest.raises(AllModelsFailed):
             generator.generate_fix(
                 analysis=_analysis(),
-                code_context="",
+                code_context="def foo():\n    pass\n",
                 cleaned_logs="ImportError",
             )
 
@@ -134,6 +134,6 @@ class TestNoNimClient:
         with pytest.raises(RuntimeError, match="No NIM client"):
             generator.generate_fix(
                 analysis=_analysis(),
-                code_context="",
+                code_context="def foo():\n    pass\n",
                 cleaned_logs="",
             )

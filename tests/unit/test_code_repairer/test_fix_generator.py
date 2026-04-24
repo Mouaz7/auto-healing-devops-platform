@@ -49,20 +49,20 @@ class TestGenerateFix:
     def test_confidence_from_llm(self, analysis, safe_fix_code):
         nim = _make_nim([_json_response(safe_fix_code, confidence=0.75)])
         gen = FixGenerator(nim_client=nim)  # type: ignore[arg-type]
-        result = gen.generate_fix(analysis, "", "logs")
+        result = gen.generate_fix(analysis, "def foo():\n    pass\n", "logs")
         assert result.confidence == pytest.approx(0.75)
 
     def test_files_to_modify_defaults_to_affected(self, analysis):
         payload = json.dumps({"fix_code": "x = 1", "confidence": 0.8, "explanation": "fix"})
         nim = _make_nim([payload])
         gen = FixGenerator(nim_client=nim)  # type: ignore[arg-type]
-        result = gen.generate_fix(analysis, "", "logs")
+        result = gen.generate_fix(analysis, "def foo():\n    pass\n", "logs")
         assert result.files_to_modify == analysis.affected_files
 
     def test_no_nim_raises_runtime_error(self, analysis):
         gen = FixGenerator(nim_client=None)
         with pytest.raises(RuntimeError, match="No NIM client configured"):
-            gen.generate_fix(analysis, "", "logs")
+            gen.generate_fix(analysis, "def foo():\n    pass\n", "logs")
 
     def test_retries_on_failure(self, analysis, safe_fix_code):
         call_count = [0]
@@ -75,7 +75,7 @@ class TestGenerateFix:
                 return _json_response(safe_fix_code)
 
         gen = FixGenerator(nim_client=RetryNim())  # type: ignore[arg-type]
-        result = gen.generate_fix(analysis, "", "logs")
+        result = gen.generate_fix(analysis, "def foo():\n    pass\n", "logs")
         assert call_count[0] == 2
         assert result.fix_patch == safe_fix_code
 
@@ -86,14 +86,14 @@ class TestGenerateFix:
 
         gen = FixGenerator(nim_client=AlwaysFails())  # type: ignore[arg-type]
         with pytest.raises(RuntimeError, match="Max retries exhausted"):
-            gen.generate_fix(analysis, "", "logs")
+            gen.generate_fix(analysis, "def foo():\n    pass\n", "logs")
 
     def test_fix_too_long_raises(self, analysis):
         long_code = "\n".join(f"x_{i} = {i}" for i in range(MAX_FIX_LINES + 2))
         nim = _make_nim([_json_response(long_code)])
         gen = FixGenerator(nim_client=nim)  # type: ignore[arg-type]
         with pytest.raises(FixTooLongError):
-            gen.generate_fix(analysis, "", "logs")
+            gen.generate_fix(analysis, "def foo():\n    pass\n", "logs")
 
     def test_all_models_failed_propagates(self, analysis):
         class AllFailed:
@@ -102,7 +102,7 @@ class TestGenerateFix:
 
         gen = FixGenerator(nim_client=AllFailed())  # type: ignore[arg-type]
         with pytest.raises(AllModelsFailed):
-            gen.generate_fix(analysis, "", "logs")
+            gen.generate_fix(analysis, "def foo():\n    pass\n", "logs")
 
 
 class TestParseResponse:

@@ -60,6 +60,40 @@ class SecretLeakError(ValueError):
     """Raised when the generated fix contains hardcoded secrets."""
 
 
+class NoCodeContextError(ValueError):
+    """Raised when generate_fix is called without real code_context.
+
+    Without the actual source file, the LLM can only hallucinate — it will
+    return code unrelated to the reported error. Better to fail loudly so the
+    orchestrator routes the failure to human review.
+    """
+
+
+_HALLUCINATED_FILENAMES = {
+    "<unknown>", "(unknown)", "unknown", "unknown.py",
+    "<file>", "<filename>", "<path>", "placeholder.py",
+    "example.py", "auto_heal_fix.py", "file.py",
+}
+
+
+def _clean_files(files: list[str]) -> list[str]:
+    """Drop empty, hallucinated, or non-Python paths from LLM output."""
+    out: list[str] = []
+    for f in files or []:
+        if not f:
+            continue
+        f = f.strip()
+        if f.lower() in _HALLUCINATED_FILENAMES:
+            continue
+        if f.startswith("<") or f.startswith("("):
+            continue
+        if any(c in f for c in "<>()[]{}"):
+            continue
+        if f.endswith(".py"):
+            out.append(f.lstrip("./"))
+    return out
+
+
 class FixGenerator:
     """Generate code fixes via the NIM LLM fallback chain.
 
@@ -90,6 +124,19 @@ class FixGenerator:
         """
         if self._nim is None:
             raise RuntimeError("No NIM client configured")
+
+        # Without real source code, the LLM can only guess. Reject immediately so
+        # the orchestrator marks the build for human review instead of shipping
+        # a hallucinated fix (binary-search-looking output for an unrelated bug).
+        if not code_context or not code_context.strip():
+            logger.error(
+                "fix_generator_aborted build_id=%s reason=empty_code_context files=%s",
+                analysis.build_id, analysis.affected_files,
+            )
+            raise NoCodeContextError(
+                "Cannot generate fix: code_context is empty. "
+                "Agent 4 failed to identify or fetch the source file."
+            )
 
         config = AGENT_CONFIGS["code_repairer"]
 
@@ -227,17 +274,28 @@ class FixGenerator:
                     )
                     continue
 
+                # Trust Agent 4's extracted files first; fall back to LLM output
+                # only when it's a clean, non-hallucinated list. This prevents
+                # "<unknown>" from sneaking into the GitHub PR as a filename.
+                llm_files = _clean_files(parsed.get("files_to_modify", []))
+                final_files = analysis.affected_files or llm_files
+                if not final_files:
+                    logger.warning(
+                        "fix_has_no_valid_files build_id=%s llm_raw=%s",
+                        analysis.build_id, parsed.get("files_to_modify"),
+                    )
+
                 return CodeFix(
                     build_id=analysis.build_id,
                     fix_patch=fix_code,
-                    files_to_modify=parsed.get("files_to_modify", analysis.affected_files),
+                    files_to_modify=final_files,
                     confidence=adjusted_confidence,
                     explanation=parsed.get("explanation", ""),
                     lint_ok=quality.passed,
                     test_ok=False,
                 )
 
-            except (AllModelsFailed, FixTooLongError, SecretLeakError):
+            except (AllModelsFailed, FixTooLongError, SecretLeakError, NoCodeContextError):
                 raise
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 last_exc = exc

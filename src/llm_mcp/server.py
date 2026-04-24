@@ -69,6 +69,12 @@ class LLMMCPServer(MCPServiceBase):
             )
         except RuntimeError as exc:
             return web.json_response({"error": str(exc)}, status=503)
+        except ValueError as exc:
+            # NoCodeContextError, FixTooLongError, SecretLeakError — all caller errors.
+            # 422 signals "orchestrator should mark build as BLOCKED for human review".
+            return web.json_response(
+                {"error": str(exc), "reason": type(exc).__name__}, status=422,
+            )
 
         return web.json_response({
             "build_id": fix.build_id,

@@ -57,6 +57,21 @@ ERROR_PATTERNS: dict[ErrorType, list[re.Pattern[str]]] = {
     ErrorType.ATTRIBUTE_ERROR: [
         re.compile(r"AttributeError:?\s*(.*)", re.IGNORECASE),
     ],
+    ErrorType.NAME_ERROR: [
+        re.compile(r"NameError:?\s*(.*)", re.IGNORECASE),
+    ],
+    ErrorType.VALUE_ERROR: [
+        re.compile(r"ValueError:?\s*(.*)", re.IGNORECASE),
+    ],
+    ErrorType.KEY_ERROR: [
+        re.compile(r"KeyError:?\s*(.*)", re.IGNORECASE),
+    ],
+    ErrorType.INDEX_ERROR: [
+        re.compile(r"IndexError:?\s*(.*)", re.IGNORECASE),
+    ],
+    ErrorType.ZERO_DIVISION_ERROR: [
+        re.compile(r"ZeroDivisionError:?\s*(.*)", re.IGNORECASE),
+    ],
 }
 
 # File paths from Python tracebacks: File "path/to/file.py", line N
@@ -67,6 +82,35 @@ _PYTEST_FILE_RE = re.compile(r'(?:FAILED|ERROR)\s+([\w./][^\s:]+\.py)', re.IGNOR
 
 # File paths from our workflow format: FAILED_FILE: ./path/to/file.py (with or without ./)
 _WORKFLOW_FILE_RE = re.compile(r'FAILED_FILE:\s*\.?/?([a-zA-Z0-9_./\-]+\.py)')
+
+# Pytest short-traceback format: "cart.py:3: NameError" or "src/cart.py:42: in func_name"
+# This catches the ACTUAL source file where the bug lives, not just the test file.
+_PYTEST_SRCLINE_RE = re.compile(
+    r'^([a-zA-Z0-9_./\-]+\.py):(\d+):\s*(?:in\s+\S+|[A-Z][a-zA-Z]*Error)',
+    re.MULTILINE,
+)
+
+# Hallucinated filenames the LLM may emit when it can't name a real file
+_HALLUCINATED_FILENAMES = {
+    "<unknown>", "(unknown)", "unknown", "unknown.py",
+    "<file>", "<filename>", "example.py", "auto_heal_fix.py",
+    "main.py", "test.py", "file.py", "<path>", "placeholder.py",
+}
+
+
+def _is_valid_filename(path: str) -> bool:
+    """Return True only for filenames that look like real source paths."""
+    if not path:
+        return False
+    stripped = path.strip().lower()
+    if stripped in _HALLUCINATED_FILENAMES:
+        return False
+    if stripped.startswith("<") or stripped.startswith("("):
+        return False
+    if not stripped.endswith(".py"):
+        return False
+    # Reject anything with suspicious chars (angle brackets, parens in name)
+    return not any(c in path for c in "<>()[]{}")
 
 
 class FailureAnalyser:
@@ -124,16 +168,31 @@ class FailureAnalyser:
         return ErrorType.UNKNOWN
 
     def _extract_files(self, logs: str) -> list[str]:
-        """Extract unique file paths from tracebacks, pytest output, and workflow format."""
+        """Extract unique file paths from tracebacks, pytest output, and workflow format.
+
+        Priority order (non-test source files first — that's where bugs usually live):
+          1. FAILED_FILE: marker (our workflow's explicit annotation)
+          2. Pytest short-traceback "file.py:N: ErrorType" — the source with the bug
+          3. Python traceback "File "...", line N"
+          4. Pytest "FAILED test_xxx.py" — test file (last resort)
+
+        Hallucinated names (<unknown>, placeholder.py, etc.) are rejected.
+        """
         seen: dict[str, None] = {}
-        # Highest priority: our workflow's explicit FAILED_FILE: marker
+
+        def _add(path: str) -> None:
+            path = path.lstrip("./").strip()
+            if _is_valid_filename(path) and path not in seen:
+                seen[path] = None
+
         for m in _WORKFLOW_FILE_RE.finditer(logs):
-            path = m.group(1).lstrip("./")
-            seen[path] = None
+            _add(m.group(1))
+        for m in _PYTEST_SRCLINE_RE.finditer(logs):
+            _add(m.group(1))
         for m in _FILE_PATH_RE.finditer(logs):
-            seen[m.group(1)] = None
+            _add(m.group(1))
         for m in _PYTEST_FILE_RE.finditer(logs):
-            seen[m.group(1)] = None
+            _add(m.group(1))
         return list(seen)
 
     def _extract_stack_trace(self, logs: str) -> str:
