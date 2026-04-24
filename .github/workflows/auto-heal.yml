@@ -16,11 +16,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pytest
+          pip install pytest pytest-timeout
 
       - name: Run tests
         id: run_tests
-        run: python -m pytest tests/ -v 2>&1 | tee /tmp/pytest_output.txt
+        run: python -m pytest tests/ -v --timeout=30 2>&1 | tee /tmp/pytest_output.txt
         continue-on-error: true
 
       - name: Trigger Auto-Healing on failure
