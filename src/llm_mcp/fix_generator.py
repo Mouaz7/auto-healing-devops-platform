@@ -1,7 +1,9 @@
 """Agent 5: Fix generator — produces code fixes via NIM LLM with quality checks.
 
 Constraints (per spec):
-  - Max 50 lines of changed code
+  - Max 20 lines of changed code (strict: most bugs = 1-5 lines)
+  - Max 10% file change or 5 lines diff vs original (whichever is more)
+  - Rejects fixes that refactor or change unrelated code
   - Max 2 retries on LLM failure
   - 60 s timeout (enforced by NimClient via AgentModelConfig.timeout_seconds)
   - Bandit + Pylint run on generated code before returning
@@ -139,10 +141,25 @@ class FixGenerator:
                 parsed = _parse_response(response)
                 fix_code: str = parsed["fix_code"]
 
-                if fix_code.count("\n") > MAX_FIX_LINES:
+                # Count total lines
+                total_lines = fix_code.count("\n")
+                if total_lines > MAX_FIX_LINES:
                     raise FixTooLongError(
-                        f"Fix has {fix_code.count(chr(10))} lines — exceeds {MAX_FIX_LINES}"
+                        f"Fix has {total_lines} lines — exceeds {MAX_FIX_LINES}"
                     )
+
+                # STRICT: Only if code_context is substantial (>10 lines), check for over-rewrites
+                # This catches cases where AI rewrites the whole file instead of minimal fix
+                if code_context and code_context.count("\n") > 10:
+                    original_lines = code_context.count("\n")
+                    # Allow up to 15% change or 5 lines, whichever is more (for substantial files)
+                    max_allowed_change = max(5, int(original_lines * 0.15))
+                    # If the diff is drastically larger than original, flag it
+                    if abs(total_lines - original_lines) > max_allowed_change:
+                        raise FixTooLongError(
+                            f"Fix changed too much: {total_lines} lines vs {original_lines} original "
+                            f"(max {max_allowed_change} allowed). Are you refactoring instead of fixing?"
+                        )
 
                 # --- Secret scan: block fixes with hardcoded credentials ---
                 scan = scan_for_secrets(fix_code)

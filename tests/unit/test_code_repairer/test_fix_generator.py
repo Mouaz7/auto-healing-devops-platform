@@ -124,4 +124,4 @@ class TestParseResponse:
         assert MAX_RETRIES == 2
 
     def test_max_fix_lines_constant(self):
-        assert MAX_FIX_LINES == 50
+        assert MAX_FIX_LINES == 20  # Strict: most bugs are 1-5 lines
