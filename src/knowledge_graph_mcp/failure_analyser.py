@@ -65,6 +65,9 @@ _FILE_PATH_RE = re.compile(r'File "([^"]+)", line \d+')
 # File paths from pytest output: FAILED tests/foo.py::test_bar or ERROR tests/foo.py
 _PYTEST_FILE_RE = re.compile(r'(?:FAILED|ERROR)\s+([\w./][^\s:]+\.py)', re.IGNORECASE)
 
+# File paths from our workflow format: FAILED_FILE: ./path/to/file.py
+_WORKFLOW_FILE_RE = re.compile(r'FAILED_FILE:\s*([\w./][^\s]+\.py)')
+
 
 class FailureAnalyser:
     """Analyse cleaned build logs to produce a :class:`FailureAnalysis`.
@@ -121,8 +124,12 @@ class FailureAnalyser:
         return ErrorType.UNKNOWN
 
     def _extract_files(self, logs: str) -> list[str]:
-        """Extract unique file paths from tracebacks and pytest output, preserving order."""
+        """Extract unique file paths from tracebacks, pytest output, and workflow format."""
         seen: dict[str, None] = {}
+        # Highest priority: our workflow's explicit FAILED_FILE: marker
+        for m in _WORKFLOW_FILE_RE.finditer(logs):
+            path = m.group(1).lstrip("./")
+            seen[path] = None
         for m in _FILE_PATH_RE.finditer(logs):
             seen[m.group(1)] = None
         for m in _PYTEST_FILE_RE.finditer(logs):
