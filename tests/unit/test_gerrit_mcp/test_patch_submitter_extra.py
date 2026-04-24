@@ -88,7 +88,7 @@ class TestCreatePrBranchExists:
             repo="owner/repo",
             build_id="existing-build",
             patch="code",
-            affected_files=[],
+            affected_files=["src/foo.py"],  # required: no-file = reject PR
         )
         assert result["pr_url"] == ""
         assert result["branch"] == "auto-heal/existing-build"

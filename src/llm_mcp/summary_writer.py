@@ -13,7 +13,9 @@ def generate_summary(
     traffic_light: TrafficLightResult,
 ) -> str:
     """Return a concise plain-text summary of the repair outcome."""
-    files = ", ".join(fix.files_to_modify) or "unknown"
+    # Prefer LLM-reported files, fall back to Agent 4's analysis, never "unknown"
+    file_list = fix.files_to_modify or analysis.affected_files or []
+    files = ", ".join(file_list) if file_list else "no file identified"
     return (
         f"Build {fix.build_id}: {analysis.error_type.value} detected "
         f"in {files}. "

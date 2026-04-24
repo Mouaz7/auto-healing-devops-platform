@@ -91,7 +91,16 @@ class PatchSubmitter:
 
         branch = f"auto-heal/{build_id}"
         pr_title = title or f"[auto-heal] Fix for build {build_id}"
-        file_path = affected_files[0] if affected_files else "auto_heal_fix.py"
+
+        # If no affected files, REFUSE to create a PR rather than guess a fake filename.
+        # This prevents bogus commits like "auto_heal_fix.py" that confuse users.
+        if not affected_files:
+            logger.error(
+                "create_pr rejected — no affected files identified (build_id=%s)", build_id,
+            )
+            return {"pr_url": "", "pr_number": 0, "branch": "", "error": "no_target_file"}
+
+        file_path = affected_files[0]
 
         for attempt in range(_MAX_RETRIES):
             try:

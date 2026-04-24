@@ -74,12 +74,21 @@ class TestGenerateSummary:
         summary = generate_summary(analysis, fix, traffic)
         assert "no" in summary
 
-    def test_no_files_shows_unknown(self):
-        """Empty files_to_modify → shows 'unknown'."""
+    def test_no_files_shows_placeholder(self):
+        """Empty files_to_modify AND empty analysis.affected_files → shows placeholder."""
         analysis, fix, traffic = _make_inputs()
         fix.files_to_modify = []
+        analysis.affected_files = []
         summary = generate_summary(analysis, fix, traffic)
-        assert "unknown" in summary
+        assert "no file identified" in summary
+
+    def test_falls_back_to_analysis_files(self):
+        """When fix.files_to_modify is empty, use analysis.affected_files."""
+        analysis, fix, traffic = _make_inputs()
+        fix.files_to_modify = []
+        analysis.affected_files = ["src/auth.py"]
+        summary = generate_summary(analysis, fix, traffic)
+        assert "src/auth.py" in summary
 
     def test_contains_score(self):
         analysis, fix, traffic = _make_inputs(final_score=0.87)

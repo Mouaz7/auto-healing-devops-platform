@@ -139,7 +139,22 @@ class FixGenerator:
             try:
                 response = self._nim.complete(messages)
                 parsed = _parse_response(response)
-                fix_code: str = parsed["fix_code"]
+
+                # SURGICAL PATCH MODE: prefer changed_lines over fix_code
+                # This guarantees minimal fixes — only the specified lines are changed
+                changed_lines = parsed.get("changed_lines", {})
+                if changed_lines and code_context:
+                    fix_code = _apply_surgical_patch(code_context, changed_lines)
+                    logger.info(
+                        "surgical_patch_applied build_id=%s lines_changed=%d",
+                        analysis.build_id, len(changed_lines),
+                    )
+                elif "fix_code" in parsed:
+                    fix_code = parsed["fix_code"]
+                else:
+                    raise ValueError(
+                        "LLM returned neither 'changed_lines' (preferred) nor 'fix_code'"
+                    )
 
                 # Count total lines
                 total_lines = fix_code.count("\n")
@@ -150,15 +165,14 @@ class FixGenerator:
 
                 # STRICT: Only if code_context is substantial (>10 lines), check for over-rewrites
                 # This catches cases where AI rewrites the whole file instead of minimal fix
-                if code_context and code_context.count("\n") > 10:
+                if code_context and code_context.count("\n") > 10 and not changed_lines:
                     original_lines = code_context.count("\n")
-                    # Allow up to 15% change or 5 lines, whichever is more (for substantial files)
+                    # Allow up to 15% change or 5 lines, whichever is more
                     max_allowed_change = max(5, int(original_lines * 0.15))
-                    # If the diff is drastically larger than original, flag it
                     if abs(total_lines - original_lines) > max_allowed_change:
                         raise FixTooLongError(
                             f"Fix changed too much: {total_lines} lines vs {original_lines} original "
-                            f"(max {max_allowed_change} allowed). Are you refactoring instead of fixing?"
+                            f"(max {max_allowed_change} allowed). Use 'changed_lines' for surgical fixes."
                         )
 
                 # --- Secret scan: block fixes with hardcoded credentials ---
@@ -230,6 +244,33 @@ class FixGenerator:
                 logger.warning("fix_attempt_failed attempt=%d error=%s", attempt, exc)
 
         raise RuntimeError(f"Max retries exhausted: {last_exc}") from last_exc
+
+
+def _apply_surgical_patch(original: str, changed_lines: dict) -> str:
+    """Apply minimal line-level changes to the original file.
+
+    Args:
+        original: Original file content (from GitHub).
+        changed_lines: {"line_number_as_str": "new_line_content"}.
+            Line numbers are 1-based to match editor/IDE conventions.
+
+    Returns:
+        The patched file content — everything unchanged except the specified lines.
+
+    This is the SAFEST way to apply AI fixes: the LLM cannot hallucinate
+    new code outside the explicitly specified lines. Guarantees minimal diff.
+    """
+    lines = original.splitlines(keepends=True)
+    for line_num_str, new_content in changed_lines.items():
+        try:
+            idx = int(line_num_str) - 1  # 1-based → 0-based
+        except (ValueError, TypeError):
+            continue
+        if 0 <= idx < len(lines):
+            # Preserve original trailing newline behaviour
+            suffix = "\n" if lines[idx].endswith("\n") else ""
+            lines[idx] = new_content.rstrip("\n") + suffix
+    return "".join(lines)
 
 
 def _parse_response(response: str) -> dict:
