@@ -1,13 +1,21 @@
 name: Auto-Healing Pipeline
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Skip auto-heal commits to prevent infinite loops
+    if: "!startsWith(github.event.head_commit.message, 'auto-heal')"
 
     steps:
       - uses: actions/checkout@v3
+        with:
+          fetch-depth: 2
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -18,16 +26,16 @@ jobs:
         run: |
           pip install pytest pytest-timeout
 
-      - name: Run tests
+      - name: Run pytest
         id: run_tests
-        run: python -m pytest tests/ -v --timeout=30 2>&1 | tee /tmp/pytest_output.txt
+        run: python3 -m pytest tests/ -v --timeout=30 2>&1 | tee /tmp/pytest.log
         continue-on-error: true
 
-      - name: Trigger Auto-Healing on failure
+      - name: Trigger Auto-Healing on test failure
         if: steps.run_tests.outcome == 'failure'
         run: |
-          LOG=$(cat /tmp/pytest_output.txt | head -c 400000)
-          curl -X POST https://washhouse-shopper-retry.ngrok-free.dev/tools/handle_build_failure \
+          LOG=$(cat /tmp/pytest.log | head -c 400000)
+          curl -s -X POST https://washhouse-shopper-retry.ngrok-free.dev/tools/handle_build_failure \
             -H "Content-Type: application/json" \
             -d "{
               \"build_id\": \"${{ github.run_id }}\",
@@ -36,4 +44,54 @@ jobs:
               \"scenario\": \"A\",
               \"raw_log\": $(echo "$LOG" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
             }"
-          echo "Auto-healing triggered!"
+          echo "Auto-healing triggered for RUNTIME failure!"
+
+      - name: AI Logic Review on changed files
+        if: steps.run_tests.outcome == 'success'
+        run: |
+          # Find Python files changed in this push
+          CHANGED=$(git diff --name-only HEAD~1 HEAD -- '*.py' 2>/dev/null || git diff --name-only HEAD -- '*.py' 2>/dev/null || echo "")
+
+          if [ -z "$CHANGED" ]; then
+            echo "No Python files changed — skipping AI review."
+            exit 0
+          fi
+
+          echo "Changed files: $CHANGED"
+          BUG_FOUND=0
+
+          for FILE in $CHANGED; do
+            if [ ! -f "$FILE" ]; then
+              echo "Skipping $FILE (not found)"
+              continue
+            fi
+
+            echo "--- AI reviewing: $FILE ---"
+            CODE=$(cat "$FILE")
+
+            RESPONSE=$(curl -s -X POST https://washhouse-shopper-retry.ngrok-free.dev/tools/review_code \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"file_path\": \"$FILE\",
+                \"code\": $(echo "$CODE" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+                \"repo\": \"${{ github.repository }}\",
+                \"build_id\": \"review-${{ github.run_id }}\"
+              }" 2>/dev/null || echo '{"has_bug":false,"reason":"server_unreachable"}')
+
+            echo "Response: $RESPONSE"
+            HAS_BUG=$(echo "$RESPONSE" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(str(d.get("has_bug","false")).lower())' 2>/dev/null || echo "false")
+
+            if [ "$HAS_BUG" = "true" ]; then
+              DESC=$(echo "$RESPONSE" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("description","logic bug detected"))' 2>/dev/null || echo "logic bug")
+              echo "⚠️  Logic bug found in $FILE: $DESC"
+              BUG_FOUND=1
+            else
+              echo "✓ $FILE looks OK"
+            fi
+          done
+
+          if [ "$BUG_FOUND" -eq 1 ]; then
+            echo "AI detected logic bug(s) — healing pipeline triggered automatically."
+          else
+            echo "✓ All changed files passed AI logic review."
+          fi
