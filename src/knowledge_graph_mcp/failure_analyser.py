@@ -65,8 +65,8 @@ _FILE_PATH_RE = re.compile(r'File "([^"]+)", line \d+')
 # File paths from pytest output: FAILED tests/foo.py::test_bar or ERROR tests/foo.py
 _PYTEST_FILE_RE = re.compile(r'(?:FAILED|ERROR)\s+([\w./][^\s:]+\.py)', re.IGNORECASE)
 
-# File paths from our workflow format: FAILED_FILE: ./path/to/file.py
-_WORKFLOW_FILE_RE = re.compile(r'FAILED_FILE:\s*([\w./][^\s]+\.py)')
+# File paths from our workflow format: FAILED_FILE: ./path/to/file.py (with or without ./)
+_WORKFLOW_FILE_RE = re.compile(r'FAILED_FILE:\s*\.?/?([a-zA-Z0-9_./\-]+\.py)')
 
 
 class FailureAnalyser:
