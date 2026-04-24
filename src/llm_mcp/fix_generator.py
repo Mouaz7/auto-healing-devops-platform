@@ -16,12 +16,17 @@ Enhancements (post Sprint 1):
 """
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
 
 from src.llm_mcp.prompt_templates import (
+    COMPLEX_MODE_THRESHOLD,
+    COMPLEX_REPAIR_TEMPLATE,
+    COMPLEX_SYSTEM_PROMPT,
     MAX_FIX_LINES,
+    MAX_FIX_LINES_COMPLEX,
     MAX_RETRIES,
     SCENARIO_A_TEMPLATE,
     SYSTEM_PROMPT,
@@ -94,6 +99,61 @@ def _clean_files(files: list[str]) -> list[str]:
     return out
 
 
+def _count_bugs_in_logs(logs: str) -> int:
+    """Count how many distinct errors appear in the build logs."""
+    error_patterns = [
+        r"SyntaxError", r"NameError", r"TypeError", r"AttributeError",
+        r"ImportError", r"IndentationError", r"ValueError", r"KeyError",
+        r"IndexError", r"AssertionError", r"FAILED\s+\S+\.py",
+    ]
+    found = set()
+    for p in error_patterns:
+        if re.search(p, logs, re.IGNORECASE):
+            found.add(p)
+    return len(found)
+
+
+def _count_syntax_errors(code: str) -> int:
+    """Return the number of detected syntax errors in the code (0 = valid Python)."""
+    try:
+        ast.parse(code)
+        return 0
+    except SyntaxError:
+        return 1
+
+
+def _validate_fix_syntax(fix_code: str) -> tuple[bool, str]:
+    """Return (is_valid, error_message). Empty error = code compiles."""
+    try:
+        ast.parse(fix_code)
+        return True, ""
+    except SyntaxError as e:
+        return False, f"SyntaxError on line {e.lineno}: {e.msg}"
+
+
+def _extract_bug_list(logs: str) -> list[str]:
+    """Pull distinct error messages from logs for the complex-mode prompt."""
+    bugs: list[str] = []
+    patterns = [
+        r"(SyntaxError[^\n]*)",
+        r"(NameError[^\n]*)",
+        r"(TypeError[^\n]*)",
+        r"(IndentationError[^\n]*)",
+        r"(AttributeError[^\n]*)",
+        r"(ValueError[^\n]*)",
+        r"(FAILED\s+\S+\.py[^\n]*)",
+        r"E\s+(.*Error[^\n]*)",
+    ]
+    seen: set[str] = set()
+    for p in patterns:
+        for m in re.finditer(p, logs, re.IGNORECASE):
+            msg = m.group(1).strip()[:120]
+            if msg not in seen:
+                bugs.append(msg)
+                seen.add(msg)
+    return bugs[:10]  # cap at 10
+
+
 class FixGenerator:
     """Generate code fixes via the NIM LLM fallback chain.
 
@@ -145,6 +205,18 @@ class FixGenerator:
         ratio = len(compressed_logs) / max(len(cleaned_logs), 1)
         logger.info("log_compressed build_id=%s ratio=%.2f", analysis.build_id, ratio)
 
+        # --- Decide: surgical mode vs complex/full-rewrite mode ---
+        # Complex mode triggers when code has many bugs, syntax errors, or garbled structure.
+        bug_count = _count_bugs_in_logs(compressed_logs)
+        code_has_syntax_error = _count_syntax_errors(code_context) > 0
+        complex_mode = bug_count >= COMPLEX_MODE_THRESHOLD or code_has_syntax_error
+
+        if complex_mode:
+            logger.info(
+                "complex_mode_activated build_id=%s bugs=%d syntax_error=%s",
+                analysis.build_id, bug_count, code_has_syntax_error,
+            )
+
         # --- Enrich prompt with past fix history ---
         past_fixes = fix_memory.query(
             error_type=analysis.error_type.value,
@@ -166,18 +238,37 @@ class FixGenerator:
             root_cause=analysis.root_cause,
             log_snippet=compressed_logs,
         )
-        logger.info("task_complexity build_id=%s level=%s", analysis.build_id, complexity.value)
+        logger.info("task_complexity build_id=%s level=%s mode=%s",
+                    analysis.build_id, complexity.value,
+                    "complex" if complex_mode else "surgical")
 
-        prompt = SCENARIO_A_TEMPLATE.format(
-            error_type=analysis.error_type.value,
-            root_cause=analysis.root_cause,
-            affected_files=", ".join(analysis.affected_files),
-            cleaned_logs=compressed_logs,
-            code_context=code_context,
-            memory_context=f"\n{memory_ctx}\n" if memory_ctx else "",
-        )
+        # Choose prompt based on mode
+        if complex_mode:
+            bug_list = _extract_bug_list(compressed_logs)
+            prompt = COMPLEX_REPAIR_TEMPLATE.format(
+                error_type=analysis.error_type.value,
+                root_cause=analysis.root_cause,
+                affected_files=", ".join(analysis.affected_files),
+                cleaned_logs=compressed_logs,
+                code_context=code_context,
+                memory_context=f"\n{memory_ctx}\n" if memory_ctx else "",
+                bug_count=bug_count,
+                bug_list="\n".join(f"  - {b}" for b in bug_list) or "  - Multiple errors detected",
+            )
+            system = COMPLEX_SYSTEM_PROMPT
+        else:
+            prompt = SCENARIO_A_TEMPLATE.format(
+                error_type=analysis.error_type.value,
+                root_cause=analysis.root_cause,
+                affected_files=", ".join(analysis.affected_files),
+                cleaned_logs=compressed_logs,
+                code_context=code_context,
+                memory_context=f"\n{memory_ctx}\n" if memory_ctx else "",
+            )
+            system = SYSTEM_PROMPT
+
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user",   "content": prompt},
         ]
 
@@ -187,42 +278,58 @@ class FixGenerator:
                 response = self._nim.complete(messages)
                 parsed = _parse_response(response)
 
-                # SURGICAL PATCH MODE: prefer changed_lines over fix_code
-                # This guarantees minimal fixes — only the specified lines are changed
+                # Pick fix source: prefer changed_lines (surgical) unless in complex mode
                 changed_lines = parsed.get("changed_lines", {})
-                if changed_lines and code_context:
+                if not complex_mode and changed_lines and code_context:
                     fix_code = _apply_surgical_patch(code_context, changed_lines)
                     logger.info(
                         "surgical_patch_applied build_id=%s lines_changed=%d",
                         analysis.build_id, len(changed_lines),
                     )
-                elif "fix_code" in parsed:
+                elif "fix_code" in parsed and parsed["fix_code"]:
                     fix_code = parsed["fix_code"]
+                elif changed_lines and code_context:
+                    # fallback: surgical even in complex mode if fix_code missing
+                    fix_code = _apply_surgical_patch(code_context, changed_lines)
                 else:
                     raise ValueError(
-                        "LLM returned neither 'changed_lines' (preferred) nor 'fix_code'"
+                        "LLM returned neither 'changed_lines' nor 'fix_code'"
                     )
 
-                # Count total lines
+                # --- Validate that the fix actually compiles ---
+                syntax_ok, syntax_err = _validate_fix_syntax(fix_code)
+                if not syntax_ok:
+                    logger.warning(
+                        "fix_syntax_invalid build_id=%s attempt=%d err=%s",
+                        analysis.build_id, attempt, syntax_err,
+                    )
+                    if attempt < MAX_RETRIES:
+                        messages[-1]["content"] += (
+                            f"\n\nSYNTAX ERROR IN YOUR FIX: {syntax_err}\n"
+                            "Your fix_code does not compile. Fix ALL syntax errors and try again."
+                        )
+                        continue
+                    raise ValueError(f"Generated fix has syntax error after {MAX_RETRIES} retries: {syntax_err}")
+
+                # Line-count guard (relaxed in complex mode)
                 total_lines = fix_code.count("\n")
-                if total_lines > MAX_FIX_LINES:
+                max_lines = MAX_FIX_LINES_COMPLEX if complex_mode else MAX_FIX_LINES
+                if total_lines > max_lines:
                     raise FixTooLongError(
-                        f"Fix has {total_lines} lines — exceeds {MAX_FIX_LINES}"
+                        f"Fix has {total_lines} lines — exceeds {max_lines}"
                     )
 
-                # STRICT: Only if code_context is substantial (>10 lines), check for over-rewrites
-                # This catches cases where AI rewrites the whole file instead of minimal fix
-                if code_context and code_context.count("\n") > 10 and not changed_lines:
+                # Over-rewrite guard only in surgical mode
+                if not complex_mode and code_context and code_context.count("\n") > 10 and not changed_lines:
                     original_lines = code_context.count("\n")
-                    # Allow up to 15% change or 5 lines, whichever is more
                     max_allowed_change = max(5, int(original_lines * 0.15))
                     if abs(total_lines - original_lines) > max_allowed_change:
                         raise FixTooLongError(
-                            f"Fix changed too much: {total_lines} lines vs {original_lines} original "
-                            f"(max {max_allowed_change} allowed). Use 'changed_lines' for surgical fixes."
+                            f"Fix changed too much: {total_lines} vs {original_lines} original. "
+                            "Use 'changed_lines' for surgical fixes."
                         )
 
-                # --- Secret scan: block fixes with hardcoded credentials ---
+                # --- Secret scan ---
                 scan = scan_for_secrets(fix_code)
                 if scan.found:
                     logger.error(
@@ -231,8 +338,8 @@ class FixGenerator:
                     )
                     if attempt < MAX_RETRIES:
                         messages[-1]["content"] += (
-                            f"\n\nSECURITY BLOCK: previous fix contained hardcoded secrets "
-                            f"({scan.summary}). Rewrite to use environment variables instead."
+                            f"\n\nSECURITY BLOCK: fix contained hardcoded secrets "
+                            f"({scan.summary}). Use environment variables instead."
                         )
                         continue
                     raise SecretLeakError(
@@ -245,38 +352,34 @@ class FixGenerator:
                 quality = evaluate_quality(bandit, pylint)
 
                 quality_gate_results.labels(
-                    gate="bandit",
-                    result="pass" if bandit.ok else "fail",
+                    gate="bandit", result="pass" if bandit.ok else "fail",
                 ).inc()
                 quality_gate_results.labels(
-                    gate="pylint",
-                    result="pass" if pylint.ok else "fail",
+                    gate="pylint", result="pass" if pylint.ok else "fail",
                 ).inc()
 
                 base_confidence = float(parsed.get("confidence", 0.5))
                 adjusted_confidence = max(0.0, base_confidence + quality.confidence_modifier)
 
                 logger.info(
-                    "fix_generated build_id=%s attempt=%d complexity=%s quality=%s conf=%.2f→%.2f",
-                    analysis.build_id, attempt, complexity.value, quality.reason,
+                    "fix_generated build_id=%s attempt=%d mode=%s bugs=%d quality=%s conf=%.2f→%.2f",
+                    analysis.build_id, attempt,
+                    "complex" if complex_mode else "surgical",
+                    bug_count, quality.reason,
                     base_confidence, adjusted_confidence,
                 )
 
-                # If bandit found HIGH issues and we have retries left, try again
                 if not bandit.ok and attempt < MAX_RETRIES:
                     messages[-1]["content"] += (
                         f"\n\nPrevious fix had security issues: {quality.reason}. "
                         "Rewrite to address them."
                     )
                     logger.warning(
-                        "fix_retry_security build_id=%s attempt=%d high_count=%d",
-                        analysis.build_id, attempt, bandit.high_count,
+                        "fix_retry_security build_id=%s attempt=%d",
+                        analysis.build_id, attempt,
                     )
                     continue
 
-                # Trust Agent 4's extracted files first; fall back to LLM output
-                # only when it's a clean, non-hallucinated list. This prevents
-                # "<unknown>" from sneaking into the GitHub PR as a filename.
                 llm_files = _clean_files(parsed.get("files_to_modify", []))
                 final_files = analysis.affected_files or llm_files
                 if not final_files:
