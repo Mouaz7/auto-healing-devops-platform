@@ -139,14 +139,35 @@ def _validate_fix_syntax(fix_code: str) -> tuple[bool, str]:
         return False, f"SyntaxError on line {e.lineno}: {e.msg}"
 
 
-def _validate_fix_runtime(fix_code: str, timeout_s: int = 5) -> tuple[bool, str]:
-    """Run the fix and verify it doesn't infinite-loop or crash.
+_SELF_ASSIGN_RE = re.compile(r"^\s*([a-zA-Z_]\w*)\s*=\s*\1\s*(?:#.*)?$", re.MULTILINE)
 
-    Returns (is_valid, error_message). Only checks code that runs at module level
-    (i.e. has no `def test_*` or other code requiring pytest fixtures).
+
+def _detect_self_assignments(code: str) -> list[str]:
+    """Find no-op self-assignments like `x = x` — always a sign of a buggy fix."""
+    return [m.group(1) for m in _SELF_ASSIGN_RE.finditer(code)]
+
+
+def _validate_fix_runtime(fix_code: str, timeout_s: int = 5) -> tuple[bool, str]:
+    """Run the fix and verify it doesn't infinite-loop, crash, or print wrong results.
+
+    Catches:
+      - Infinite loops (timeout)
+      - Runtime crashes (non-zero exit)
+      - Self-assignments (`x = x`) — always a bug
+      - "Not found" output for cases that should find the value
+
+    Returns (is_valid, error_message).
     """
     if "def test_" in fix_code:
         return True, ""
+
+    # Static check: self-assignment is always a bug
+    self_assigns = _detect_self_assignments(fix_code)
+    if self_assigns:
+        return False, (
+            f"SELF-ASSIGNMENT DETECTED: '{self_assigns[0]} = {self_assigns[0]}' is a no-op "
+            "and always a bug. Remove it and replace with the correct logic."
+        )
 
     import subprocess
     import tempfile
@@ -160,6 +181,14 @@ def _validate_fix_runtime(fix_code: str, timeout_s: int = 5) -> tuple[bool, str]
         )
         if result.returncode != 0:
             return False, f"RuntimeError: {result.stderr.strip()[:300]}"
+        # Output sanity: if the script searches for a value that's clearly in
+        # the data and prints "Not found", the fix is wrong even though it ran.
+        out = (result.stdout or "").lower()
+        if "not found" in out and "found at" not in out:
+            return False, (
+                "WRONG OUTPUT: code prints 'Not found' but the searched value "
+                "should be findable. The logic is still incorrect."
+            )
         return True, ""
     except subprocess.TimeoutExpired:
         return False, f"INFINITE LOOP: code did not finish within {timeout_s}s — your fix still has a bug"
