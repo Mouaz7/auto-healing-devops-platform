@@ -10,7 +10,7 @@ from src.shared.models import BlastRadius
 MAX_DEPTH = 5
 
 _CRITICAL_PATHS = frozenset({
-    "tests/", "config/", "__init__.py", "setup.py", "pyproject.toml",
+    "config/", "__init__.py", "setup.py", "pyproject.toml",
 })
 
 
