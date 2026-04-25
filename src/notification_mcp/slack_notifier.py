@@ -31,7 +31,7 @@ _SLACK_TEMPLATES: dict[str, dict] = {
             {"type": "section",
              "text": {"type": "mrkdwn",
                       "text": "*Build:* __BUILD_ID__\n*Confidence:* __SCORE_PCT__%\n"
-                              "*Reason:* __REASON__\n__EXPLANATION__"}},
+                              "*Files:* __FILES__\n*Reason:* __REASON__\n__EXPLANATION__"}},
         ],
     },
     "RED": {
@@ -40,7 +40,7 @@ _SLACK_TEMPLATES: dict[str, dict] = {
              "text": {"type": "plain_text", "text": "🔴 Fix Blocked"}},
             {"type": "section",
              "text": {"type": "mrkdwn",
-                      "text": "*Build:* __BUILD_ID__\n*Reason:* __REASON__\n"
+                      "text": "*Build:* __BUILD_ID__\n*Files:* __FILES__\n*Reason:* __REASON__\n"
                               "Manual intervention required."}},
         ],
     },
