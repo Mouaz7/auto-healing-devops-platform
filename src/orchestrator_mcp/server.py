@@ -13,6 +13,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import urllib.parse
 import uuid
 
@@ -255,6 +256,18 @@ class OrchestratorMCPServer(MCPServiceBase):
                         code_context += ctx_resp.json().get("content", "")
                 except Exception:  # pylint: disable=broad-exception-caught
                     pass  # code context is best-effort
+
+        # Fallback: extract code directly from the log's FILE_CONTENT_START block
+        # Used when gerrit fetch fails (network issues, rate limits, etc.)
+        if not code_context and raw_log:
+            fc_match = re.search(
+                r"FILE_CONTENT_START:[^\n]*\n(.*?)FILE_CONTENT_END",
+                raw_log,
+                re.DOTALL,
+            )
+            if fc_match:
+                code_context = fc_match.group(1).strip()
+                logger.info("code_context_from_log build_id=%s chars=%d", build_id, len(code_context))
 
         # Step 3: Agent 5 — generate fix
         self.engine.advance(build_id, WorkflowStatus.GENERATING_FIX)
