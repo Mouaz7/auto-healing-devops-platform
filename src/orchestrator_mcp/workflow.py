@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 VALID_TRANSITIONS: dict[WorkflowStatus, set[WorkflowStatus]] = {
     WorkflowStatus.PENDING:          {WorkflowStatus.ANALYSING, WorkflowStatus.FAILED},
     WorkflowStatus.ANALYSING:        {WorkflowStatus.GENERATING_FIX, WorkflowStatus.FAILED},
-    WorkflowStatus.GENERATING_FIX:   {WorkflowStatus.VALIDATING, WorkflowStatus.FAILED},
+    WorkflowStatus.GENERATING_FIX:   {WorkflowStatus.VALIDATING, WorkflowStatus.FAILED, WorkflowStatus.BLOCKED},
     WorkflowStatus.VALIDATING:       {
         WorkflowStatus.AWAITING_REVIEW,
         WorkflowStatus.APPLYING_FIX,

@@ -933,7 +933,7 @@ class OrchestratorMCPServer(MCPServiceBase):
 
         try:
             from src.shared.nim_client import NimClient
-            nim = NimClient(agent_name="fix_generator")
+            nim = NimClient(agent_name="code_repairer", agent_env_prefix="CODE_REPAIRER")
             raw = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: nim.complete([
