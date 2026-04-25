@@ -49,18 +49,19 @@ class DependencyTracker:
         """Classify blast radius from the affected file list.
 
         Rules:
-        - Any critical path file (tests/, config/, __init__.py…) → HIGH
-        - 6+ files → HIGH
-        - 2–5 files → MEDIUM
-        - 0–1 files → LOW
+        - Any critical infrastructure file (config/, __init__.py, setup.py,
+          pyproject.toml, auth/, payments/) → HIGH (always needs manual review)
+        - 10+ files → HIGH (sweeping change, human should review)
+        - 4–9 files → MEDIUM (multi-file fix, AI handles it but flags YELLOW)
+        - 0–3 files → LOW (typical bug fix, AI auto-handles)
         """
         count = len(affected_files)
         has_critical = any(
             any(cp in f for cp in _CRITICAL_PATHS)
             for f in affected_files
         )
-        if has_critical or count >= 6:
+        if has_critical or count >= 10:
             return BlastRadius.HIGH
-        if count >= 2:
+        if count >= 4:
             return BlastRadius.MEDIUM
         return BlastRadius.LOW
