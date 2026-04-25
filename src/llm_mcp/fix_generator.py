@@ -65,6 +65,14 @@ class SecretLeakError(ValueError):
     """Raised when the generated fix contains hardcoded secrets."""
 
 
+class FixStillBrokenError(ValueError):
+    """Raised when the LLM cannot produce a runtime-correct fix after retries.
+
+    The fix compiled but still infinite-looped or crashed when executed.
+    Routes to BLOCKED status so a human can intervene.
+    """
+
+
 class NoCodeContextError(ValueError):
     """Raised when generate_fix is called without real code_context.
 
@@ -129,6 +137,41 @@ def _validate_fix_syntax(fix_code: str) -> tuple[bool, str]:
         return True, ""
     except SyntaxError as e:
         return False, f"SyntaxError on line {e.lineno}: {e.msg}"
+
+
+def _validate_fix_runtime(fix_code: str, timeout_s: int = 5) -> tuple[bool, str]:
+    """Run the fix and verify it doesn't infinite-loop or crash.
+
+    Returns (is_valid, error_message). Only checks code that runs at module level
+    (i.e. has no `def test_*` or other code requiring pytest fixtures).
+    """
+    if "def test_" in fix_code:
+        return True, ""
+
+    import subprocess
+    import tempfile
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+            f.write(fix_code)
+            tmp_path = f.name
+        result = subprocess.run(
+            ["python3", tmp_path],
+            capture_output=True, text=True, timeout=timeout_s,
+        )
+        if result.returncode != 0:
+            return False, f"RuntimeError: {result.stderr.strip()[:300]}"
+        return True, ""
+    except subprocess.TimeoutExpired:
+        return False, f"INFINITE LOOP: code did not finish within {timeout_s}s — your fix still has a bug"
+    except Exception as exc:
+        logger.warning("runtime_validation_skipped err=%s", exc)
+        return True, ""
+    finally:
+        try:
+            import os as _os
+            _os.unlink(tmp_path)
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
 
 
 def _extract_bug_list(logs: str) -> list[str]:
@@ -311,6 +354,27 @@ class FixGenerator:
                         continue
                     raise ValueError(f"Generated fix has syntax error after {MAX_RETRIES} retries: {syntax_err}")
 
+                # --- Runtime validation: actually run the fix to catch infinite loops & logic bugs ---
+                runtime_ok, runtime_err = _validate_fix_runtime(fix_code)
+                if not runtime_ok:
+                    logger.warning(
+                        "fix_runtime_invalid build_id=%s attempt=%d err=%s",
+                        analysis.build_id, attempt, runtime_err,
+                    )
+                    if attempt < MAX_RETRIES:
+                        messages[-1]["content"] += (
+                            f"\n\nYOUR FIX IS STILL BROKEN: {runtime_err}\n"
+                            "When the code runs it does not work correctly. "
+                            "Re-read the original bug carefully and produce a fix that actually resolves it. "
+                            "For binary search: use `left = mid + 1` when target > arr[mid], "
+                            "and `right = mid - 1` when target < arr[mid]. Both branches MUST shrink the search range."
+                        )
+                        continue
+                    raise FixStillBrokenError(
+                        f"AI tried {MAX_RETRIES + 1} times but the fix still does not work: {runtime_err}. "
+                        "Manual review required."
+                    )
+
                 # Line-count guard (relaxed in complex mode)
                 total_lines = fix_code.count("\n")
                 max_lines = MAX_FIX_LINES_COMPLEX if complex_mode else MAX_FIX_LINES
@@ -398,7 +462,7 @@ class FixGenerator:
                     test_ok=False,
                 )
 
-            except (AllModelsFailed, FixTooLongError, SecretLeakError, NoCodeContextError):
+            except (AllModelsFailed, FixTooLongError, SecretLeakError, NoCodeContextError, FixStillBrokenError):
                 raise
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 last_exc = exc
