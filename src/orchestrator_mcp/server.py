@@ -227,6 +227,18 @@ class OrchestratorMCPServer(MCPServiceBase):
             if required not in analysis:
                 raise ValueError(f"Agent 4 response missing '{required}': {analysis}")
 
+        # Fallback: if log cleaner stripped FAILED_FILE lines, extract from raw_log directly
+        if not analysis["affected_files"] and raw_log:
+            for m in re.finditer(r"FAILED_FILE:\s*(\S+\.py)", raw_log):
+                candidate = m.group(1).strip().lstrip("./")
+                if candidate and candidate not in analysis["affected_files"]:
+                    analysis["affected_files"].append(candidate)
+            if analysis["affected_files"]:
+                logger.info(
+                    "affected_files_from_log build_id=%s files=%s",
+                    build_id, analysis["affected_files"],
+                )
+
         # Regression check: if the failing files were recently fixed, emit a warning
         regression = heal_verifier.check_regression(build_id, analysis["affected_files"])
         if regression:

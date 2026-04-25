@@ -169,7 +169,7 @@ FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
     },
 ]
 
-MAX_FIX_LINES = 20          # Surgical mode: max lines changed
+MAX_FIX_LINES = 50          # Surgical mode: max lines changed (covers small full-file rewrites)
 MAX_FIX_LINES_COMPLEX = 300 # Complex mode: allow full file rewrite
 MAX_RETRIES = 2
 LLM_TIMEOUT_SECONDS = 60
