@@ -902,7 +902,7 @@ class OrchestratorMCPServer(MCPServiceBase):
         POST /tools/review_code
         Body: {"file_path": "foo.py", "code": "...", "repo": "...", "build_id": "..."}
 
-        Sends code to Agent 4 (LLM analysis) and returns whether a bug was found.
+        Calls the LLM directly to review the code for logic bugs.
         If a bug is found, automatically triggers handle_build_failure.
         """
         try:
@@ -918,45 +918,41 @@ class OrchestratorMCPServer(MCPServiceBase):
         if not code or not file_path:
             return web.json_response({"error": "file_path and code required"}, status=400)
 
-        # Ask Agent 4 (LLM) to review the code for any bug — crash or not
-        review_prompt = (
-            f"Review this Python code for bugs. Look for: logic errors, wrong variable names, "
-            f"incorrect operators, off-by-one errors, wrong conditions, etc.\n\n"
-            f"File: {file_path}\n\n```python\n{code}\n```\n\n"
-            f"Respond with JSON only:\n"
-            f'{{"has_bug": true/false, "error_type": "LOGIC_ERROR|NAME_ERROR|...", '
-            f'"description": "what is wrong and on which line", "line": <line_number>}}'
+        system_prompt = (
+            "You are a code review agent. Carefully read the Python code and look for bugs: "
+            "logic errors, wrong operators, off-by-one errors, incorrect variable names, "
+            "wrong return values, infinite loops, wrong conditions.\n\n"
+            "Respond with JSON only — no explanation outside the JSON:\n"
+            '{"has_bug": true|false, "error_type": "LOGIC_ERROR|NAME_ERROR|VALUE_ERROR|...", '
+            '"description": "exact description of the bug and which line", "line": <line_number>}'
         )
+        user_prompt = f"File: {file_path}\n\n```python\n{code}\n```"
 
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
-                    f"{SERVICE_URLS['knowledge_graph']}/tools/analyze_failure",
-                    json={"cleaned_logs": review_prompt, "build_id": build_id},
-                )
-                analysis = resp.json()
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            logger.warning("review_code agent4_failed file=%s err=%s", file_path, exc)
-            return web.json_response({"has_bug": False, "reason": "agent unavailable"})
-
-        # Parse the LLM's review response from root_cause field
-        root_cause = analysis.get("root_cause", "")
         has_bug = False
         bug_description = ""
 
-        # Try to parse structured response from LLM
         try:
-            import re as _re
-            json_match = _re.search(r'\{[^{}]+\}', root_cause)
+            from src.shared.nim_client import NimClient
+            nim = NimClient(agent_name="fix_generator")
+            raw = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: nim.complete([
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": user_prompt},
+                ]),
+            )
+            json_match = re.search(r'\{[^{}]+\}', raw, re.DOTALL)
             if json_match:
                 review = json.loads(json_match.group())
-                has_bug = review.get("has_bug", False)
-                bug_description = review.get("description", root_cause)
-        except Exception:  # pylint: disable=broad-exception-caught
-            # Fallback: look for keywords indicating a bug
-            bug_keywords = ["wrong", "incorrect", "error", "bug", "should be", "instead of"]
-            has_bug = any(kw in root_cause.lower() for kw in bug_keywords)
-            bug_description = root_cause
+                has_bug = bool(review.get("has_bug", False))
+                bug_description = review.get("description", "")
+            else:
+                bug_keywords = ["wrong", "incorrect", "error", "bug", "should be", "infinite loop"]
+                has_bug = any(kw in raw.lower() for kw in bug_keywords)
+                bug_description = raw[:300]
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning("review_code llm_failed file=%s err=%s", file_path, exc)
+            return web.json_response({"has_bug": False, "reason": "llm unavailable"})
 
         if not has_bug:
             return web.json_response({"has_bug": False, "file": file_path})
