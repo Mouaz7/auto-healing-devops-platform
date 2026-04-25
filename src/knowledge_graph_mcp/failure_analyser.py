@@ -247,7 +247,12 @@ def _parse_llm_response(response: str) -> tuple[ErrorType, str, list[str]]:
             root_cause = line.split(":", 1)[1].strip()
         elif line.startswith("AFFECTED_FILES:"):
             raw_files = line.split(":", 1)[1].strip()
-            files = [f.strip() for f in raw_files.split(",") if f.strip()]
+            # Filter out hallucinated/placeholder values like "None", "null", "n/a"
+            _placeholders = {"none", "null", "n/a", "na", "<unknown>", "(unknown)", "unknown", ""}
+            files = [
+                f.strip() for f in raw_files.split(",")
+                if f.strip() and f.strip().lower() not in _placeholders
+            ]
 
     return error_type, root_cause, files
 

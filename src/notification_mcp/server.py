@@ -65,7 +65,11 @@ class NotificationMCPServer(MCPServiceBase):
         )
 
         result = evaluate_traffic_light(code_fix, analysis)
-        files_str = ", ".join(analysis.affected_files)
+        files_str = ", ".join(analysis.affected_files) if analysis.affected_files else "(none reported)"
+        logger.info(
+            "notify_files build_id=%s files=%s files_str=%r",
+            build_id, analysis.affected_files, files_str,
+        )
 
         # Fire notifications concurrently — failure does not block the response
         teams_ok, slack_ok = await asyncio.gather(
