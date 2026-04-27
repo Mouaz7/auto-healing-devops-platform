@@ -26,12 +26,12 @@ jobs:
         run: |
           pip install pytest pytest-timeout
 
-      - name: Run pytest
+      - name: Run pytest (with 30s per-test timeout)
         id: run_tests
         run: python3 -m pytest tests/ -v --timeout=30 2>&1 | tee /tmp/pytest.log
         continue-on-error: true
 
-      - name: Trigger Auto-Healing on test failure
+      - name: Trigger on test failure
         if: steps.run_tests.outcome == 'failure'
         run: |
           LOG=$(cat /tmp/pytest.log | head -c 400000)
@@ -46,30 +46,124 @@ jobs:
             }"
           echo "Auto-healing triggered for RUNTIME failure!"
 
-      - name: Find and fix ALL bug types
-        run: pip install astroid 2>/dev/null || true
+      - name: Static logic analysis (AST)
+        if: steps.run_tests.outcome == 'success'
+        id: static_analysis
+        run: |
+          CHANGED=$(git diff --name-only HEAD~1 HEAD -- '*.py' 2>/dev/null || \
+                    git diff --name-only HEAD -- '*.py' 2>/dev/null || echo "")
+
+          if [ -z "$CHANGED" ]; then
+            echo "No Python files changed — skipping static analysis."
+            echo "bug_found=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Analysing: $CHANGED"
+
+          python3 - <<'PYEOF' $CHANGED
+          import ast, sys, json, os
+
+          SELF_BUG_TYPES = {
+              ast.Lt: "<",  ast.Gt: ">",  ast.NotEq: "!=",
+              ast.LtE: "<=", ast.GtE: ">=",
+          }
+          TAUTOLOGY_TYPES = {ast.Eq: "==", ast.Is: "is"}
+
+          bugs = []
+
+          def check_compare(node, filepath):
+              """Flag comparisons where left and right are identical names/constants."""
+              operands = [node.left] + node.comparators
+              for i, op in enumerate(node.ops):
+                  lhs = operands[i]
+                  rhs = operands[i + 1]
+                  lhs_src = ast.unparse(lhs)
+                  rhs_src = ast.unparse(rhs)
+                  if lhs_src == rhs_src:
+                      op_sym = SELF_BUG_TYPES.get(type(op)) or TAUTOLOGY_TYPES.get(type(op), "?")
+                      if type(op) in SELF_BUG_TYPES:
+                          verdict = "always False (dead condition)"
+                      else:
+                          verdict = "always True (tautology)"
+                      bugs.append({
+                          "file": filepath,
+                          "line": node.lineno,
+                          "code": f"{lhs_src} {op_sym} {rhs_src}",
+                          "verdict": verdict,
+                          "error_type": "SELF_COMPARISON",
+                      })
+
+          def check_while_true_no_break(node, filepath):
+              """Flag while True: loops with no break statement."""
+              if not (isinstance(node.test, ast.Constant) and node.test.value is True):
+                  return
+              has_break = any(isinstance(n, ast.Break) for n in ast.walk(node))
+              if not has_break:
+                  bugs.append({
+                      "file": filepath,
+                      "line": node.lineno,
+                      "code": "while True: (no break)",
+                      "verdict": "infinite loop — no break found",
+                      "error_type": "INFINITE_LOOP",
+                  })
+
+          for filepath in sys.argv[1:]:
+              if not os.path.isfile(filepath):
+                  continue
+              try:
+                  source = open(filepath).read()
+                  tree = ast.parse(source, filepath)
+              except SyntaxError as e:
+                  print(f"SYNTAX ERROR in {filepath}: {e}")
+                  continue
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Compare):
+                      check_compare(node, filepath)
+                  elif isinstance(node, ast.While):
+                      check_while_true_no_break(node, filepath)
+
+          if bugs:
+              print(f"\n{'='*60}")
+              print(f"STATIC ANALYSIS: {len(bugs)} logic bug(s) found")
+              print(f"{'='*60}")
+              for b in bugs:
+                  print(f"::error file={b['file']},line={b['line']}::{b['error_type']} at line {b['line']}: `{b['code']}` — {b['verdict']}")
+              print(json.dumps({"bugs": bugs}, indent=2))
+              sys.exit(1)
+          else:
+              print("Static analysis: no logic bugs found.")
+              sys.exit(0)
+          PYEOF
+
+          STATUS=$?
+          if [ "$STATUS" -eq 1 ]; then
+            echo "bug_found=true" >> $GITHUB_OUTPUT
+          else
+            echo "bug_found=false" >> $GITHUB_OUTPUT
+          fi
+          exit $STATUS
 
       - name: AI Logic Review on changed files
-        if: steps.run_tests.outcome == 'success'
+        if: steps.run_tests.outcome == 'success' && steps.static_analysis.outputs.bug_found == 'false'
         run: |
-          CHANGED=$(git diff --name-only HEAD~1 HEAD -- '*.py' 2>/dev/null || git diff --name-only HEAD -- '*.py' 2>/dev/null || echo "")
+          CHANGED=$(git diff --name-only HEAD~1 HEAD -- '*.py' 2>/dev/null || \
+                    git diff --name-only HEAD -- '*.py' 2>/dev/null || echo "")
 
           if [ -z "$CHANGED" ]; then
             echo "No Python files changed — skipping AI review."
             exit 0
           fi
 
-          echo "Changed files: $CHANGED"
           BUG_FOUND=0
           SERVER="https://washhouse-shopper-retry.ngrok-free.dev"
 
           for FILE in $CHANGED; do
-            [ ! -f "$FILE" ] && echo "Skipping $FILE (not found)" && continue
+            [ ! -f "$FILE" ] && continue
 
             echo "--- AI review: $FILE ---"
             CODE=$(cat "$FILE")
 
-            # --max-time 60: prevents one slow review from blocking the whole step
             HTTP_CODE=$(curl -s -o /tmp/review_resp.json -w "%{http_code}" \
               --max-time 60 \
               -X POST "$SERVER/tools/review_code" \
@@ -81,13 +175,13 @@ jobs:
                 \"build_id\": \"review-${{ github.run_id }}\"
               }" 2>/dev/null || echo "000")
 
-            if [ "$HTTP_CODE" = "000" ] || [ -z "$HTTP_CODE" ]; then
-              echo "⚠️  AI review server unreachable (network/ngrok down) — skipping $FILE"
+            if [ "$HTTP_CODE" = "000" ] || [ "$HTTP_CODE" = "" ]; then
+              echo "⚠️  AI review server unreachable — skipping $FILE"
               continue
             fi
 
             if [ "$HTTP_CODE" != "200" ]; then
-              echo "⚠️  AI review server returned HTTP $HTTP_CODE for $FILE"
+              echo "⚠️  Server returned HTTP $HTTP_CODE for $FILE"
               continue
             fi
 
@@ -100,7 +194,7 @@ jobs:
 
             if [ "$HAS_BUG" = "true" ]; then
               DESC=$(echo "$RESPONSE" | python3 -c \
-                'import json,sys; d=json.load(sys.stdin); print(d.get("description","logic bug detected"))' \
+                'import json,sys; d=json.load(sys.stdin); print(d.get("description","logic bug"))' \
                 2>/dev/null || echo "logic bug")
               FIX=$(echo "$RESPONSE" | python3 -c \
                 'import json,sys; d=json.load(sys.stdin); print(d.get("fix",""))' \
@@ -114,8 +208,6 @@ jobs:
           done
 
           if [ "$BUG_FOUND" -eq 1 ]; then
-            echo "AI detected logic bug(s) — healing pipeline triggered."
             exit 1
-          else
-            echo "✓ All changed files passed AI logic review."
           fi
+          echo "✓ All changed files passed AI logic review."
