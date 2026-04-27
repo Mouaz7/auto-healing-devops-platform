@@ -959,14 +959,33 @@ class OrchestratorMCPServer(MCPServiceBase):
             return web.json_response({"error": "file_path and code required"}, status=400)
 
         system_prompt = (
-            "You are a code review agent. Carefully read the Python code and look for bugs: "
-            "logic errors, wrong operators, off-by-one errors, incorrect variable names, "
-            "wrong return values, infinite loops, wrong conditions.\n\n"
-            "Respond with JSON only — no explanation outside the JSON:\n"
-            '{"has_bug": true|false, "error_type": "LOGIC_ERROR|NAME_ERROR|VALUE_ERROR|...", '
-            '"description": "exact description of the bug and which line", "line": <line_number>}'
+            "You are an expert Python code reviewer specializing in logic bugs that do NOT cause "
+            "crashes or test failures but produce wrong behaviour.\n\n"
+            "Carefully check every line for:\n"
+            "1. SELF-COMPARISON: a variable compared to itself, e.g. `if x < x`, `if n == n` "
+            "   — always true/false, kills loops or recursion silently.\n"
+            "2. WRONG VARIABLE: using the wrong variable name in a condition or expression, "
+            "   e.g. `if low < high` written as `if high < high`.\n"
+            "3. OFF-BY-ONE: loop bounds, index +1/-1 mistakes.\n"
+            "4. INFINITE LOOP: loop condition that never changes.\n"
+            "5. DEAD CODE: branch that can never execute.\n"
+            "6. WRONG OPERATOR: `<` vs `<=`, `and` vs `or`, `=` vs `==`.\n"
+            "7. WRONG RETURN: function returns wrong variable or constant.\n"
+            "8. SWAPPED ARGUMENTS: arguments passed in wrong order.\n\n"
+            "For EVERY condition (`if`, `while`, `for`) ask yourself: "
+            "'Can this ever be True AND False, or is one side always the same as the other?'\n\n"
+            "Respond with JSON only — no text outside the JSON:\n"
+            '{"has_bug": true|false, "error_type": "SELF_COMPARISON|WRONG_VAR|OFF_BY_ONE|'
+            'INFINITE_LOOP|DEAD_CODE|WRONG_OPERATOR|WRONG_RETURN|SWAPPED_ARGS|OTHER", '
+            '"description": "exact bug description with line number and what it should be", '
+            '"line": <line_number>, "fix": "the corrected line of code"}'
         )
-        user_prompt = f"File: {file_path}\n\n```python\n{code}\n```"
+        user_prompt = (
+            f"File: {file_path}\n\n"
+            "IMPORTANT: Look especially for self-comparisons like `if x < x` or `if x == x` "
+            "which are always False/True and make algorithms do nothing.\n\n"
+            f"```python\n{code}\n```"
+        )
 
         has_bug = False
         bug_description = ""

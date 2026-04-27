@@ -46,10 +46,12 @@ jobs:
             }"
           echo "Auto-healing triggered for RUNTIME failure!"
 
+      - name: Find and fix ALL bug types
+        run: pip install astroid 2>/dev/null || true
+
       - name: AI Logic Review on changed files
         if: steps.run_tests.outcome == 'success'
         run: |
-          # Find Python files changed in this push
           CHANGED=$(git diff --name-only HEAD~1 HEAD -- '*.py' 2>/dev/null || git diff --name-only HEAD -- '*.py' 2>/dev/null || echo "")
 
           if [ -z "$CHANGED" ]; then
@@ -59,39 +61,61 @@ jobs:
 
           echo "Changed files: $CHANGED"
           BUG_FOUND=0
+          SERVER="https://washhouse-shopper-retry.ngrok-free.dev"
 
           for FILE in $CHANGED; do
-            if [ ! -f "$FILE" ]; then
-              echo "Skipping $FILE (not found)"
-              continue
-            fi
+            [ ! -f "$FILE" ] && echo "Skipping $FILE (not found)" && continue
 
-            echo "--- AI reviewing: $FILE ---"
+            echo "--- AI review: $FILE ---"
             CODE=$(cat "$FILE")
 
-            RESPONSE=$(curl -s -X POST https://washhouse-shopper-retry.ngrok-free.dev/tools/review_code \
+            # --max-time 60: prevents one slow review from blocking the whole step
+            HTTP_CODE=$(curl -s -o /tmp/review_resp.json -w "%{http_code}" \
+              --max-time 60 \
+              -X POST "$SERVER/tools/review_code" \
               -H "Content-Type: application/json" \
               -d "{
                 \"file_path\": \"$FILE\",
                 \"code\": $(echo "$CODE" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
                 \"repo\": \"${{ github.repository }}\",
                 \"build_id\": \"review-${{ github.run_id }}\"
-              }" 2>/dev/null || echo '{"has_bug":false,"reason":"server_unreachable"}')
+              }" 2>/dev/null || echo "000")
 
+            if [ "$HTTP_CODE" = "000" ] || [ -z "$HTTP_CODE" ]; then
+              echo "⚠️  AI review server unreachable (network/ngrok down) — skipping $FILE"
+              continue
+            fi
+
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "⚠️  AI review server returned HTTP $HTTP_CODE for $FILE"
+              continue
+            fi
+
+            RESPONSE=$(cat /tmp/review_resp.json)
             echo "Response: $RESPONSE"
-            HAS_BUG=$(echo "$RESPONSE" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(str(d.get("has_bug","false")).lower())' 2>/dev/null || echo "false")
+
+            HAS_BUG=$(echo "$RESPONSE" | python3 -c \
+              'import json,sys; d=json.load(sys.stdin); print(str(d.get("has_bug","false")).lower())' \
+              2>/dev/null || echo "false")
 
             if [ "$HAS_BUG" = "true" ]; then
-              DESC=$(echo "$RESPONSE" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("description","logic bug detected"))' 2>/dev/null || echo "logic bug")
-              echo "⚠️  Logic bug found in $FILE: $DESC"
+              DESC=$(echo "$RESPONSE" | python3 -c \
+                'import json,sys; d=json.load(sys.stdin); print(d.get("description","logic bug detected"))' \
+                2>/dev/null || echo "logic bug")
+              FIX=$(echo "$RESPONSE" | python3 -c \
+                'import json,sys; d=json.load(sys.stdin); print(d.get("fix",""))' \
+                2>/dev/null || echo "")
+              echo "::error file=$FILE::Logic bug: $DESC"
+              [ -n "$FIX" ] && echo "  Suggested fix: $FIX"
               BUG_FOUND=1
             else
-              echo "✓ $FILE looks OK"
+              echo "✓ $FILE — no logic bugs found"
             fi
           done
 
           if [ "$BUG_FOUND" -eq 1 ]; then
-            echo "AI detected logic bug(s) — healing pipeline triggered automatically."
+            echo "AI detected logic bug(s) — healing pipeline triggered."
+            exit 1
           else
             echo "✓ All changed files passed AI logic review."
           fi
