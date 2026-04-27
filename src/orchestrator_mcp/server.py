@@ -1044,23 +1044,38 @@ class OrchestratorMCPServer(MCPServiceBase):
     async def _trigger_healing_for_review(
         self, build_id: str, repo: str, raw_log: str
     ) -> None:
-        """Submit a code-review-detected bug to the main healing pipeline."""
+        """Submit a code-review-detected bug to the main healing pipeline.
+
+        Runs the pipeline DIRECTLY (not via HTTP self-call). The previous
+        implementation POST'd to its own /tools/handle_build_failure, which
+        meant the LLM-mcp timeout (300s) inside _run_pipeline raced against
+        the outer HTTP timeout (also 300s) — and lost, producing a misleading
+        ReadTimeout for the orchestrator's own endpoint.
+        """
+        # Register the workflow so subsequent UI/state queries can find it
+        state = WorkflowState(build_id=build_id, status=WorkflowStatus.PENDING)
+        try:
+            self.engine.register(state)
+        except ValueError:
+            logger.info("review_healing_already_registered build_id=%s", build_id)
+            return
+
+        # Use a fresh client; pipeline call has its own internal timeouts
         try:
             async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-                resp = await client.post(
-                    f"http://localhost:{self._port}/tools/handle_build_failure",
-                    json={"build_id": build_id, "repo": repo,
-                          "branch": "main", "scenario": "A", "raw_log": raw_log},
+                result = await self._run_pipeline(
+                    client, build_id, raw_log, repo, str(uuid.uuid4())
                 )
-                logger.info(
-                    "review_healing_trigger_done build_id=%s status=%d body=%s",
-                    build_id, resp.status_code, resp.text[:300],
-                )
+            logger.info(
+                "review_healing_trigger_done build_id=%s status=%s",
+                build_id, result.get("status"),
+            )
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.error(
                 "review_healing_trigger_failed build_id=%s err=%r type=%s",
                 build_id, exc, type(exc).__name__,
             )
+            self._safe_fail(build_id, str(exc) or repr(exc))
 
 
 def _serialise(state: WorkflowState) -> dict:

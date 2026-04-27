@@ -170,6 +170,18 @@ PHASE 4 — EXECUTION & THE FIX
     - Returns the SAME function/variable names as the original (preserve API).
     - Comments only where genuinely useful — and ONLY in simple English.
 
+  CRITICAL — DO NOT REMOVE INITIALISATION CODE WHEN FIXING A CONDITION:
+    When the bug is in a condition (e.g. `if high < high`), the fix is the
+    condition only. ALL surrounding code — especially default-argument
+    initialisation like `if high is None: high = len(array) - 1` — MUST
+    remain intact in `fix_code`. Removing such guards introduces NEW
+    runtime errors (e.g. `TypeError: '<' not supported between 'int' and
+    'NoneType'`) and the validation step will reject your fix.
+
+    BEFORE returning fix_code, mentally trace one call with the default
+    arguments. If any variable can be `None` at the comparison, the
+    initialisation guard MUST be present.
+
 ==============================================================================
 STRICT CODE CONSTRAINTS
 ==============================================================================
