@@ -43,7 +43,7 @@ from src.gerrit_mcp.github_approver import extract_build_id
 
 logger = logging.getLogger(__name__)
 
-_HTTP_TIMEOUT = 180.0   # seconds per agent call (LLM can be slow)
+_HTTP_TIMEOUT = 300.0   # seconds per agent call (LLM has 3 retries × 60s + runtime validation)
 _GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 # How often the background pruner runs (seconds)
 _PRUNE_INTERVAL = 3600
@@ -178,6 +178,13 @@ class OrchestratorMCPServer(MCPServiceBase):
                     client, build_id, raw_log, repo, correlation_id
                 )
             except Exception as exc:  # pylint: disable=broad-exception-caught
+                import traceback
+                tb = traceback.format_exc()
+                err_str = str(exc) or repr(exc) or f"{type(exc).__name__}(no message)"
+                logger.error(
+                    "pipeline_exception build_id=%s type=%s str=%r repr=%r\n%s",
+                    build_id, type(exc).__name__, str(exc), repr(exc), tb,
+                )
                 # Extract files from raw_log so the fallback Slack shows them
                 fallback_files: list[str] = []
                 if raw_log:
@@ -185,12 +192,13 @@ class OrchestratorMCPServer(MCPServiceBase):
                         f = m.group(1).strip().lstrip("./")
                         if f and f not in fallback_files:
                             fallback_files.append(f)
-                handle_agent_failure("orchestrator", build_id, str(exc), fallback_files)
-                self._safe_fail(build_id, str(exc))
-                await trigger_global_fallback("orchestrator", build_id, str(exc), fallback_files)
-                audit.log("pipeline_failed", build_id=build_id, error=str(exc))
+                handle_agent_failure("orchestrator", build_id, err_str, fallback_files)
+                self._safe_fail(build_id, err_str)
+                await trigger_global_fallback("orchestrator", build_id, err_str, fallback_files)
+                audit.log("pipeline_failed", build_id=build_id, error=err_str)
                 return web.json_response(
-                    {"build_id": build_id, "status": "FAILED", "error": str(exc)},
+                    {"build_id": build_id, "status": "FAILED", "error": err_str,
+                     "type": type(exc).__name__},
                     status=500,
                 )
 
