@@ -26,7 +26,8 @@ T = TypeVar("T")
 
 def handle_agent_failure(failed_agent: str,
                           build_id: str,
-                          reason: str) -> dict[str, Any]:
+                          reason: str,
+                          affected_files: list[str] | None = None) -> dict[str, Any]:
     """Trigger the global fallback rule.
 
     Called when any agent crashes or returns invalid state.
@@ -37,6 +38,7 @@ def handle_agent_failure(failed_agent: str,
         failed_agent: Name of the agent that failed.
         build_id: The build ID being processed.
         reason: Error message / reason for failure.
+        affected_files: Optional file list to include in the notification.
     """
     logger.error(
         "global_fallback_triggered failed_agent=%s build_id=%s reason=%s",
@@ -55,20 +57,23 @@ def handle_agent_failure(failed_agent: str,
         "confidence": 0.0,
         "blast_radius": "HIGH",
         "error_type": "UNKNOWN",
+        "affected_files": affected_files or [],
     }
 
 
 async def trigger_global_fallback(failed_agent: str,
                                    build_id: str,
-                                   reason: str) -> None:
+                                   reason: str,
+                                   affected_files: list[str] | None = None) -> None:
     """Call Agent 6 directly with RED when an agent crashes.
 
     Args:
         failed_agent: Name of the failed agent.
         build_id: Build being processed.
         reason: Why the fallback was triggered.
+        affected_files: Optional file list (so the Slack notification shows files).
     """
-    payload = handle_agent_failure(failed_agent, build_id, reason)
+    payload = handle_agent_failure(failed_agent, build_id, reason, affected_files)
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             await client.post(

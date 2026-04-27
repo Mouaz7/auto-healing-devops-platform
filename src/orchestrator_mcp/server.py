@@ -178,9 +178,16 @@ class OrchestratorMCPServer(MCPServiceBase):
                     client, build_id, raw_log, repo, correlation_id
                 )
             except Exception as exc:  # pylint: disable=broad-exception-caught
-                handle_agent_failure("orchestrator", build_id, str(exc))
+                # Extract files from raw_log so the fallback Slack shows them
+                fallback_files: list[str] = []
+                if raw_log:
+                    for m in re.finditer(r"FAILED_FILE:\s*(\S+\.py)", raw_log):
+                        f = m.group(1).strip().lstrip("./")
+                        if f and f not in fallback_files:
+                            fallback_files.append(f)
+                handle_agent_failure("orchestrator", build_id, str(exc), fallback_files)
                 self._safe_fail(build_id, str(exc))
-                await trigger_global_fallback("orchestrator", build_id, str(exc))
+                await trigger_global_fallback("orchestrator", build_id, str(exc), fallback_files)
                 audit.log("pipeline_failed", build_id=build_id, error=str(exc))
                 return web.json_response(
                     {"build_id": build_id, "status": "FAILED", "error": str(exc)},
@@ -1013,13 +1020,20 @@ class OrchestratorMCPServer(MCPServiceBase):
         """Submit a code-review-detected bug to the main healing pipeline."""
         try:
             async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-                await client.post(
+                resp = await client.post(
                     f"http://localhost:{self._port}/tools/handle_build_failure",
                     json={"build_id": build_id, "repo": repo,
                           "branch": "main", "scenario": "A", "raw_log": raw_log},
                 )
+                logger.info(
+                    "review_healing_trigger_done build_id=%s status=%d body=%s",
+                    build_id, resp.status_code, resp.text[:300],
+                )
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            logger.error("review_healing_trigger_failed build_id=%s err=%s", build_id, exc)
+            logger.error(
+                "review_healing_trigger_failed build_id=%s err=%r type=%s",
+                build_id, exc, type(exc).__name__,
+            )
 
 
 def _serialise(state: WorkflowState) -> dict:
