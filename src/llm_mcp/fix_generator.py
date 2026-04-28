@@ -203,6 +203,38 @@ def _validate_fix_runtime(fix_code: str, timeout_s: int = 5) -> tuple[bool, str]
             pass
 
 
+def _build_retry_prompt(original_prompt: str, failed_attempts: list[dict]) -> str:
+    """Construct a retry prompt that shows ALL prior failures so the LLM does
+    not repeat the same mistakes. Replaces the user message rather than
+    appending — appending caused the message to grow unbounded across retries
+    and let the LLM lose track of the original task.
+    """
+    parts = [original_prompt, "", "=" * 60, "PRIOR FAILED ATTEMPTS", "=" * 60]
+    for fa in failed_attempts:
+        parts.append("")
+        parts.append(f"--- Attempt {fa['attempt']} ({fa['kind']}) FAILED ---")
+        parts.append(f"Error: {fa['err']}")
+        parts.append(f"Your previous fix_code began with:\n{fa['fix_preview']}")
+    parts.extend([
+        "",
+        "=" * 60,
+        "INSTRUCTIONS FOR THIS ATTEMPT",
+        "=" * 60,
+        "1. Read EVERY prior error above. Do NOT submit a fix that produces",
+        "   any of the same errors.",
+        "2. The original code may contain MULTIPLE INTERACTING BUGS. Look at",
+        "   every line — typos in subscripts (a[a]), wrong variable names",
+        "   (low instead of array), forgotten function calls (bare tuples),",
+        "   undefined variables in scope, off-by-one. Fix ALL of them in one",
+        "   pass — surgical patches will not converge for multi-bug files.",
+        "3. Before returning fix_code, mentally run the program with the",
+        "   default arguments and verify no NameError, TypeError, or",
+        "   IndexError can occur.",
+        "4. Preserve initialisation guards (e.g. `if x is None: x = ...`).",
+    ])
+    return "\n".join(parts)
+
+
 def _extract_bug_list(logs: str) -> list[str]:
     """Pull distinct error messages from logs for the complex-mode prompt."""
     bugs: list[str] = []
@@ -345,6 +377,9 @@ class FixGenerator:
         ]
 
         last_exc: Exception = RuntimeError("No attempts made")
+        # Track all failed attempts so we can show them to the LLM and avoid repeats
+        failed_attempts: list[dict] = []
+        original_user_prompt = prompt
         for attempt in range(MAX_RETRIES + 1):
             try:
                 response = self._nim.complete(messages)
@@ -376,9 +411,14 @@ class FixGenerator:
                         analysis.build_id, attempt, syntax_err,
                     )
                     if attempt < MAX_RETRIES:
-                        messages[-1]["content"] += (
-                            f"\n\nSYNTAX ERROR IN YOUR FIX: {syntax_err}\n"
-                            "Your fix_code does not compile. Fix ALL syntax errors and try again."
+                        failed_attempts.append({
+                            "attempt": attempt,
+                            "kind": "syntax",
+                            "err": syntax_err[:400],
+                            "fix_preview": fix_code[:300],
+                        })
+                        messages[-1]["content"] = _build_retry_prompt(
+                            original_user_prompt, failed_attempts
                         )
                         continue
                     raise ValueError(f"Generated fix has syntax error after {MAX_RETRIES} retries: {syntax_err}")
@@ -391,12 +431,14 @@ class FixGenerator:
                         analysis.build_id, attempt, runtime_err,
                     )
                     if attempt < MAX_RETRIES:
-                        messages[-1]["content"] += (
-                            f"\n\nYOUR FIX IS STILL BROKEN: {runtime_err}\n"
-                            "When the code runs it does not work correctly. "
-                            "Re-read the original bug carefully and produce a fix that actually resolves it. "
-                            "For binary search: use `left = mid + 1` when target > arr[mid], "
-                            "and `right = mid - 1` when target < arr[mid]. Both branches MUST shrink the search range."
+                        failed_attempts.append({
+                            "attempt": attempt,
+                            "kind": "runtime",
+                            "err": runtime_err[:600],
+                            "fix_preview": fix_code[:300],
+                        })
+                        messages[-1]["content"] = _build_retry_prompt(
+                            original_user_prompt, failed_attempts
                         )
                         continue
                     raise FixStillBrokenError(

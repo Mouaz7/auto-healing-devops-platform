@@ -322,7 +322,7 @@ FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
 
 MAX_FIX_LINES = 50          # Surgical mode: max lines changed (covers small full-file rewrites)
 MAX_FIX_LINES_COMPLEX = 300 # Complex mode: allow full file rewrite
-MAX_RETRIES = 2
+MAX_RETRIES = 4             # 5 attempts total — needed for files with 5+ interacting bugs
 LLM_TIMEOUT_SECONDS = 60
 # Number of detected bugs that triggers COMPLEX mode (full rewrite instead of surgical)
 COMPLEX_MODE_THRESHOLD = 3
