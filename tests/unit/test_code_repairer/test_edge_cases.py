@@ -28,10 +28,10 @@ def _analysis(build_id: str = "b1") -> FailureAnalysis:
 
 
 class TestFixTooLong:
-    def test_fix_exceeds_50_lines_raises(self):
-        """LLM returning 51-line fix (51 newlines) → FixTooLongError raised."""
-        # count("\n") > 50 requires 51+ newlines = 52 items joined
-        long_fix = "\n".join(f"x = {i}" for i in range(52))
+    def test_fix_exceeds_max_lines_raises(self):
+        """LLM returning a fix longer than MAX_FIX_LINES → FixTooLongError raised."""
+        # count("\n") > MAX_FIX_LINES (100) requires 101+ newlines = 102 items joined
+        long_fix = "\n".join(f"x = {i}" for i in range(102))
         response = json.dumps({
             "fix_code": long_fix,
             "confidence": 0.8,

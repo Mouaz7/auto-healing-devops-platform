@@ -1,11 +1,12 @@
 """Agent 5: Fix generator — produces code fixes via NIM LLM with quality checks.
 
 Constraints (per spec):
-  - Max 20 lines of changed code (strict: most bugs = 1-5 lines)
+  - Max 100 lines of changed code (surgical) / 600 lines (complex rewrite)
   - Max 10% file change or 5 lines diff vs original (whichever is more)
   - Rejects fixes that refactor or change unrelated code
-  - Max 2 retries on LLM failure
-  - 60 s timeout (enforced by NimClient via AgentModelConfig.timeout_seconds)
+  - Max 8 retries on LLM failure (9 attempts total); attempt budget
+    scales further with bug count up to 14 attempts for 10+ bug files
+  - 120 s timeout per LLM call
   - Bandit + Pylint run on generated code before returning
 
 Enhancements (post Sprint 1):
@@ -122,8 +123,8 @@ def _count_bugs_in_logs(logs: str) -> int:
       1. Distinct exception TYPES that appear (NameError, TypeError, ...).
       2. Individual `line N:` markers from the static analyser, which can
          identify e.g. 8 dead-expression bugs in the same file.
-    Returned value is capped at 20 — that is the upper limit the protocol
-    is designed for and the prompt advertises.
+    Returned value is capped at 40 — doubled from the previous 20-bug
+    ceiling so very high-density files still scale the retry budget.
     """
     error_patterns = [
         r"SyntaxError", r"NameError", r"TypeError", r"AttributeError",
@@ -150,7 +151,7 @@ def _count_bugs_in_logs(logs: str) -> int:
     # the file is structurally broken in several places.
     syntax_signal = 3 if re.search(r"ERROR_TYPE:\s*SyntaxError", logs) else 0
 
-    return min(20, len(distinct_types) + static_findings + failed_file_blocks + syntax_signal)
+    return min(40, len(distinct_types) + static_findings + failed_file_blocks + syntax_signal)
 
 
 def _count_syntax_errors(code: str) -> int:
@@ -230,15 +231,15 @@ def _validate_fix_runtime(fix_code: str, timeout_s: int = 5) -> tuple[bool, str]
             capture_output=True, text=True, timeout=timeout_s,
         )
         if result.returncode != 0:
-            # Keep the full traceback (capped at 2500 chars to leave token room).
+            # Keep the full traceback (capped at 5000 chars to leave token room).
             # 300 chars used to truncate mid-word at the most useful line —
             # the actual failing function name in the deepest frame —
             # which left the LLM guessing across retries.
             err = result.stderr.strip()
-            if len(err) > 2500:
-                # Prefer the deepest frame: keep last 2500 chars (where the
+            if len(err) > 5000:
+                # Prefer the deepest frame: keep last 5000 chars (where the
                 # final "File ... line N, in <fn>\n   <code>" + Exception live).
-                err = "...[traceback truncated]...\n" + err[-2500:]
+                err = "...[traceback truncated]...\n" + err[-5000:]
             return False, f"RuntimeError: {err}"
         # Output sanity: if the script searches for a value that's clearly in
         # the data and prints "Not found", the fix is wrong even though it ran.
@@ -462,17 +463,18 @@ class FixGenerator:
         failed_attempts: list[dict] = []
         original_user_prompt = prompt
 
-        # Dynamic retry budget: scale with bug density so 20-bug files have
-        # room to converge while simple 1-bug fixes don't waste LLM calls.
-        #   ≤2 bugs: 3 attempts (MAX_RETRIES // 2 + 1)
-        #   3-9 bugs: MAX_RETRIES + 1 attempts (5)
-        #   10-20 bugs: MAX_RETRIES + 3 attempts (7)
+        # Dynamic retry budget: scale with bug density so high-bug files
+        # have room to converge while simple 1-bug fixes don't waste LLM
+        # calls. All tiers doubled from previous version.
+        #   ≤2 bugs:    6 attempts
+        #   3-9 bugs:   10 attempts (= MAX_RETRIES + 2)
+        #   10-40 bugs: 14 attempts (= MAX_RETRIES + 6)
         if bug_count >= 10:
-            attempt_budget = MAX_RETRIES + 3
+            attempt_budget = MAX_RETRIES + 6
         elif bug_count >= 3:
-            attempt_budget = MAX_RETRIES + 1
+            attempt_budget = MAX_RETRIES + 2
         else:
-            attempt_budget = max(3, MAX_RETRIES // 2 + 1)
+            attempt_budget = 6
         logger.info(
             "retry_budget build_id=%s bugs=%d attempts=%d",
             analysis.build_id, bug_count, attempt_budget,
@@ -512,8 +514,8 @@ class FixGenerator:
                         failed_attempts.append({
                             "attempt": attempt,
                             "kind": "syntax",
-                            "err": syntax_err[:800],
-                            "fix_preview": fix_code[:500],
+                            "err": syntax_err[:1600],
+                            "fix_preview": fix_code[:1000],
                         })
                         messages[-1]["content"] = _build_retry_prompt(
                             original_user_prompt, failed_attempts
@@ -537,8 +539,8 @@ class FixGenerator:
                             # Keep enough of the traceback for the LLM to see
                             # the deepest frame (line + function name), not
                             # just the entry point.
-                            "err": runtime_err[:2500],
-                            "fix_preview": fix_code[:500],
+                            "err": runtime_err[:5000],
+                            "fix_preview": fix_code[:1000],
                         })
                         messages[-1]["content"] = _build_retry_prompt(
                             original_user_prompt, failed_attempts

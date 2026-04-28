@@ -121,10 +121,9 @@ class TestParseResponse:
             _parse_response("not json at all")
 
     def test_max_retries_constant(self):
-        # Raised to 4 (5 attempts total) so the LLM can converge on
-        # files with 5+ interacting bugs; 2 retries was too few.
-        assert MAX_RETRIES == 4
+        # Doubled from 4 to 8 (9 attempts total) for harder multi-bug files.
+        assert MAX_RETRIES == 8
 
     def test_max_fix_lines_constant(self):
-        # Surgical mode covers small full-file rewrites (up to 50 lines).
-        assert MAX_FIX_LINES == 50
+        # Doubled to 100 lines for surgical mode.
+        assert MAX_FIX_LINES == 100
