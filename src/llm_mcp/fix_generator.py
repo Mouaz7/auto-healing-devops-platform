@@ -82,6 +82,14 @@ class NoCodeContextError(ValueError):
     """
 
 
+class SyntaxFixExhaustedError(ValueError):
+    """Raised when every retry produced fix_code that fails to compile.
+
+    Should be treated as BLOCKED (HTTP 422), not 503 — more retries from
+    the orchestrator will not help; the LLM kept producing invalid Python.
+    """
+
+
 _HALLUCINATED_FILENAMES = {
     "<unknown>", "(unknown)", "unknown", "unknown.py",
     "<file>", "<filename>", "<path>", "placeholder.py",
@@ -193,7 +201,16 @@ def _validate_fix_runtime(fix_code: str, timeout_s: int = 5) -> tuple[bool, str]
             capture_output=True, text=True, timeout=timeout_s,
         )
         if result.returncode != 0:
-            return False, f"RuntimeError: {result.stderr.strip()[:300]}"
+            # Keep the full traceback (capped at 2500 chars to leave token room).
+            # 300 chars used to truncate mid-word at the most useful line —
+            # the actual failing function name in the deepest frame —
+            # which left the LLM guessing across retries.
+            err = result.stderr.strip()
+            if len(err) > 2500:
+                # Prefer the deepest frame: keep last 2500 chars (where the
+                # final "File ... line N, in <fn>\n   <code>" + Exception live).
+                err = "...[traceback truncated]...\n" + err[-2500:]
+            return False, f"RuntimeError: {err}"
         # Output sanity: if the script searches for a value that's clearly in
         # the data and prints "Not found", the fix is wrong even though it ran.
         out = (result.stdout or "").lower()
@@ -444,14 +461,16 @@ class FixGenerator:
                         failed_attempts.append({
                             "attempt": attempt,
                             "kind": "syntax",
-                            "err": syntax_err[:400],
-                            "fix_preview": fix_code[:300],
+                            "err": syntax_err[:800],
+                            "fix_preview": fix_code[:500],
                         })
                         messages[-1]["content"] = _build_retry_prompt(
                             original_user_prompt, failed_attempts
                         )
                         continue
-                    raise ValueError(f"Generated fix has syntax error after {attempt_budget} attempts: {syntax_err}")
+                    raise SyntaxFixExhaustedError(
+                        f"Generated fix has syntax error after {attempt_budget} attempts: {syntax_err}"
+                    )
 
                 # --- Runtime validation: actually run the fix to catch infinite loops & logic bugs ---
                 runtime_ok, runtime_err = _validate_fix_runtime(fix_code)
@@ -464,8 +483,11 @@ class FixGenerator:
                         failed_attempts.append({
                             "attempt": attempt,
                             "kind": "runtime",
-                            "err": runtime_err[:600],
-                            "fix_preview": fix_code[:300],
+                            # Keep enough of the traceback for the LLM to see
+                            # the deepest frame (line + function name), not
+                            # just the entry point.
+                            "err": runtime_err[:2500],
+                            "fix_preview": fix_code[:500],
                         })
                         messages[-1]["content"] = _build_retry_prompt(
                             original_user_prompt, failed_attempts
@@ -563,7 +585,9 @@ class FixGenerator:
                     test_ok=False,
                 )
 
-            except (AllModelsFailed, FixTooLongError, SecretLeakError, NoCodeContextError, FixStillBrokenError):
+            except (AllModelsFailed, FixTooLongError, SecretLeakError,
+                    NoCodeContextError, FixStillBrokenError,
+                    SyntaxFixExhaustedError):
                 raise
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 last_exc = exc
