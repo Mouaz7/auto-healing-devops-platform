@@ -108,17 +108,30 @@ def _clean_files(files: list[str]) -> list[str]:
 
 
 def _count_bugs_in_logs(logs: str) -> int:
-    """Count how many distinct errors appear in the build logs."""
+    """Count distinct bugs in the build logs.
+
+    Combines two signals:
+      1. Distinct exception TYPES that appear (NameError, TypeError, ...).
+      2. Individual `line N:` markers from the static analyser, which can
+         identify e.g. 8 dead-expression bugs in the same file.
+    Returned value is capped at 20 — that is the upper limit the protocol
+    is designed for and the prompt advertises.
+    """
     error_patterns = [
         r"SyntaxError", r"NameError", r"TypeError", r"AttributeError",
         r"ImportError", r"IndentationError", r"ValueError", r"KeyError",
         r"IndexError", r"AssertionError", r"FAILED\s+\S+\.py",
     ]
-    found = set()
+    distinct_types = set()
     for p in error_patterns:
         if re.search(p, logs, re.IGNORECASE):
-            found.add(p)
-    return len(found)
+            distinct_types.add(p)
+
+    # Count per-line static-analysis findings (DEAD_EXPRESSION,
+    # SELF_COMPARISON, INFINITE_LOOP, etc.). Each `line N:` is one bug.
+    static_findings = len(re.findall(r"\bline\s+\d+\s*:", logs, re.IGNORECASE))
+
+    return min(20, len(distinct_types) + static_findings)
 
 
 def _count_syntax_errors(code: str) -> int:
@@ -380,7 +393,24 @@ class FixGenerator:
         # Track all failed attempts so we can show them to the LLM and avoid repeats
         failed_attempts: list[dict] = []
         original_user_prompt = prompt
-        for attempt in range(MAX_RETRIES + 1):
+
+        # Dynamic retry budget: scale with bug density so 20-bug files have
+        # room to converge while simple 1-bug fixes don't waste LLM calls.
+        #   ≤2 bugs: 3 attempts (MAX_RETRIES // 2 + 1)
+        #   3-9 bugs: MAX_RETRIES + 1 attempts (5)
+        #   10-20 bugs: MAX_RETRIES + 3 attempts (7)
+        if bug_count >= 10:
+            attempt_budget = MAX_RETRIES + 3
+        elif bug_count >= 3:
+            attempt_budget = MAX_RETRIES + 1
+        else:
+            attempt_budget = max(3, MAX_RETRIES // 2 + 1)
+        logger.info(
+            "retry_budget build_id=%s bugs=%d attempts=%d",
+            analysis.build_id, bug_count, attempt_budget,
+        )
+
+        for attempt in range(attempt_budget):
             try:
                 response = self._nim.complete(messages)
                 parsed = _parse_response(response)
@@ -410,7 +440,7 @@ class FixGenerator:
                         "fix_syntax_invalid build_id=%s attempt=%d err=%s",
                         analysis.build_id, attempt, syntax_err,
                     )
-                    if attempt < MAX_RETRIES:
+                    if attempt < attempt_budget - 1:
                         failed_attempts.append({
                             "attempt": attempt,
                             "kind": "syntax",
@@ -421,7 +451,7 @@ class FixGenerator:
                             original_user_prompt, failed_attempts
                         )
                         continue
-                    raise ValueError(f"Generated fix has syntax error after {MAX_RETRIES} retries: {syntax_err}")
+                    raise ValueError(f"Generated fix has syntax error after {attempt_budget} attempts: {syntax_err}")
 
                 # --- Runtime validation: actually run the fix to catch infinite loops & logic bugs ---
                 runtime_ok, runtime_err = _validate_fix_runtime(fix_code)
@@ -430,7 +460,7 @@ class FixGenerator:
                         "fix_runtime_invalid build_id=%s attempt=%d err=%s",
                         analysis.build_id, attempt, runtime_err,
                     )
-                    if attempt < MAX_RETRIES:
+                    if attempt < attempt_budget - 1:
                         failed_attempts.append({
                             "attempt": attempt,
                             "kind": "runtime",
@@ -442,7 +472,7 @@ class FixGenerator:
                         )
                         continue
                     raise FixStillBrokenError(
-                        f"AI tried {MAX_RETRIES + 1} times but the fix still does not work: {runtime_err}. "
+                        f"AI tried {attempt_budget} times but the fix still does not work: {runtime_err}. "
                         "Manual review required."
                     )
 
@@ -471,7 +501,7 @@ class FixGenerator:
                         "fix_secret_detected build_id=%s findings=%s",
                         analysis.build_id, scan.summary,
                     )
-                    if attempt < MAX_RETRIES:
+                    if attempt < attempt_budget - 1:
                         messages[-1]["content"] += (
                             f"\n\nSECURITY BLOCK: fix contained hardcoded secrets "
                             f"({scan.summary}). Use environment variables instead."
@@ -504,7 +534,7 @@ class FixGenerator:
                     base_confidence, adjusted_confidence,
                 )
 
-                if not bandit.ok and attempt < MAX_RETRIES:
+                if not bandit.ok and attempt < attempt_budget - 1:
                     messages[-1]["content"] += (
                         f"\n\nPrevious fix had security issues: {quality.reason}. "
                         "Rewrite to address them."
