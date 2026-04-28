@@ -139,7 +139,18 @@ def _count_bugs_in_logs(logs: str) -> int:
     # SELF_COMPARISON, INFINITE_LOOP, etc.). Each `line N:` is one bug.
     static_findings = len(re.findall(r"\bline\s+\d+\s*:", logs, re.IGNORECASE))
 
-    return min(20, len(distinct_types) + static_findings)
+    # Count FAILED_FILE blocks from the prescan flow — each represents a
+    # file that crashed at compile or runtime. A multi-bug file from
+    # prescan will only have 1 FAILED_FILE but the underlying code is
+    # still complex, so weight it slightly.
+    failed_file_blocks = len(re.findall(r"^FAILED_FILE:\s*\S+", logs, re.MULTILINE))
+
+    # If the log contains a syntax error from prescan, treat as 3+ bugs
+    # so complex-mode is engaged: pre-existing syntax errors usually mean
+    # the file is structurally broken in several places.
+    syntax_signal = 3 if re.search(r"ERROR_TYPE:\s*SyntaxError", logs) else 0
+
+    return min(20, len(distinct_types) + static_findings + failed_file_blocks + syntax_signal)
 
 
 def _count_syntax_errors(code: str) -> int:
@@ -152,12 +163,30 @@ def _count_syntax_errors(code: str) -> int:
 
 
 def _validate_fix_syntax(fix_code: str) -> tuple[bool, str]:
-    """Return (is_valid, error_message). Empty error = code compiles."""
+    """Return (is_valid, error_message). Empty error = code compiles.
+
+    On failure, includes the actual offending line and a few lines of
+    context. 'SyntaxError on line 5: unexpected indent' alone is too
+    abstract — the LLM keeps producing the same broken indentation
+    across retries because it cannot see WHAT it wrote on line 5.
+    """
     try:
         ast.parse(fix_code)
         return True, ""
     except SyntaxError as e:
-        return False, f"SyntaxError on line {e.lineno}: {e.msg}"
+        lines = fix_code.splitlines()
+        ln = e.lineno or 0
+        ctx_start = max(0, ln - 3)
+        ctx_end = min(len(lines), ln + 2)
+        context_lines = []
+        for i in range(ctx_start, ctx_end):
+            marker = ">>> " if (i + 1) == ln else "    "
+            context_lines.append(f"{marker}{i + 1:4d} | {lines[i]}")
+        ctx = "\n".join(context_lines)
+        return False, (
+            f"SyntaxError on line {ln}: {e.msg}\n"
+            f"Code context (>>> marks the failing line):\n{ctx}"
+        )
 
 
 _SELF_ASSIGN_RE = re.compile(r"^\s*([a-zA-Z_]\w*)\s*=\s*\1\s*(?:#.*)?$", re.MULTILINE)
@@ -238,8 +267,30 @@ def _build_retry_prompt(original_prompt: str, failed_attempts: list[dict]) -> st
     not repeat the same mistakes. Replaces the user message rather than
     appending — appending caused the message to grow unbounded across retries
     and let the LLM lose track of the original task.
+
+    If the last 2 attempts produced the SAME error message, the LLM is
+    stuck in a loop. In that case we prepend a STRATEGY PIVOT directive
+    forcing it to throw away its previous approach.
     """
+    # Detect a stuck loop: identical short error fingerprints in the
+    # last two attempts.
+    stuck = False
+    if len(failed_attempts) >= 2:
+        last = failed_attempts[-1]["err"][:120]
+        prev = failed_attempts[-2]["err"][:120]
+        stuck = last == prev
+
     parts = [original_prompt, "", "=" * 60, "PRIOR FAILED ATTEMPTS", "=" * 60]
+    if stuck:
+        parts.extend([
+            "",
+            "*** STRATEGY PIVOT REQUIRED ***",
+            "Your last two attempts produced the SAME error. You are in a loop.",
+            "Throw away your previous approach completely. Re-read the original",
+            "code from scratch. Identify ALL bugs first (full Scan Phase). Write",
+            "the entire file from a blank slate — do not edit your previous fix.",
+            "",
+        ])
     for fa in failed_attempts:
         parts.append("")
         parts.append(f"--- Attempt {fa['attempt']} ({fa['kind']}) FAILED ---")
