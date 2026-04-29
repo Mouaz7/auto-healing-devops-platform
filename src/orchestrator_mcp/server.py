@@ -220,27 +220,65 @@ class OrchestratorMCPServer(MCPServiceBase):
         # Step 1: Agent 3 — clean logs
         # (regression check happens after Step 2 analysis, once we know the files)
         self.engine.advance(build_id, WorkflowStatus.ANALYSING)
-        clean_resp = await client.post(
-            f"{SERVICE_URLS['log_cleaner']}/tools/clean_logs",
-            json={"build_id": build_id, "raw_log": raw_log},
-            headers=extra_headers,
-        )
-        clean_resp.raise_for_status()
-        cleaned = clean_resp.json()
-        if "cleaned_logs" not in cleaned:
-            raise ValueError(f"Agent 3 response missing 'cleaned_logs': {cleaned}")
+        # Log cleaning is best-effort: if the agent is down or slow, fall
+        # back to the raw log rather than blocking the whole pipeline for
+        # 5 minutes on a transient timeout. The downstream analyser still
+        # works fine on raw logs — it just gets slightly noisier input.
+        try:
+            clean_resp = await client.post(
+                f"{SERVICE_URLS['log_cleaner']}/tools/clean_logs",
+                json={"build_id": build_id, "raw_log": raw_log},
+                headers=extra_headers,
+                timeout=30.0,
+            )
+            clean_resp.raise_for_status()
+            cleaned = clean_resp.json()
+            if "cleaned_logs" not in cleaned:
+                raise ValueError(f"Agent 3 response missing 'cleaned_logs': {cleaned}")
+        except (httpx.TimeoutException, httpx.HTTPStatusError, ValueError) as exc:
+            logger.warning(
+                "log_cleaner_unavailable build_id=%s err=%r — using raw log",
+                build_id, exc,
+            )
+            cleaned = {"cleaned_logs": raw_log}
 
         # Step 2: Agent 4 — analyze failure
-        analyse_resp = await client.post(
-            f"{SERVICE_URLS['knowledge_graph']}/tools/analyze_failure",
-            json={"build_id": build_id, "cleaned_logs": cleaned["cleaned_logs"]},
-            headers=extra_headers,
-        )
-        analyse_resp.raise_for_status()
-        analysis = analyse_resp.json()
-        for required in ("error_type", "blast_radius", "affected_files", "confidence", "root_cause"):
-            if required not in analysis:
-                raise ValueError(f"Agent 4 response missing '{required}': {analysis}")
+        # If the analyser is unreachable, infer minimal analysis from the
+        # raw log (FAILED_FILE markers + naive error type) so the LLM can
+        # still attempt a fix. Without this, a flaky analyser blocks every
+        # auto-heal attempt.
+        try:
+            analyse_resp = await client.post(
+                f"{SERVICE_URLS['knowledge_graph']}/tools/analyze_failure",
+                json={"build_id": build_id, "cleaned_logs": cleaned["cleaned_logs"]},
+                headers=extra_headers,
+                timeout=60.0,
+            )
+            analyse_resp.raise_for_status()
+            analysis = analyse_resp.json()
+            for required in ("error_type", "blast_radius", "affected_files", "confidence", "root_cause"):
+                if required not in analysis:
+                    raise ValueError(f"Agent 4 response missing '{required}': {analysis}")
+        except (httpx.TimeoutException, httpx.HTTPStatusError, ValueError) as exc:
+            logger.warning(
+                "analyser_unavailable build_id=%s err=%r — using minimal analysis",
+                build_id, exc,
+            )
+            fallback_files: list[str] = []
+            for m in re.finditer(r"FAILED_FILE:\s*(\S+\.py)", raw_log or ""):
+                f = m.group(1).strip().lstrip("./")
+                if f and f not in fallback_files:
+                    fallback_files.append(f)
+            err_type = "LOGIC_ERROR"
+            if re.search(r"ERROR_TYPE:\s*(\w+)", raw_log or ""):
+                err_type = re.search(r"ERROR_TYPE:\s*(\w+)", raw_log).group(1)
+            analysis = {
+                "error_type": err_type,
+                "blast_radius": "LOW" if len(fallback_files) <= 1 else "MEDIUM",
+                "affected_files": fallback_files,
+                "confidence": 0.5,
+                "root_cause": "analyser unavailable — using log-extracted minimal analysis",
+            }
 
         # Fallback: if log cleaner stripped FAILED_FILE lines, extract from raw_log directly
         if not analysis["affected_files"] and raw_log:
