@@ -198,6 +198,47 @@ def _detect_self_assignments(code: str) -> list[str]:
     return [m.group(1) for m in _SELF_ASSIGN_RE.finditer(code)]
 
 
+_SORT_OUTPUT_RE = re.compile(
+    r"sort(?:ed)?[^\[\n]*[:=]\s*(\[[^\]]+\])",
+    re.IGNORECASE,
+)
+
+
+def _check_sort_output(stdout: str) -> str:
+    """If the program advertises sorted output (e.g. 'Sorted array: [...]'),
+    parse the printed list and verify it is actually sorted. Returns an
+    error message if the output is wrong; empty string if OK or not
+    a sort-style program.
+
+    Catches the common failure mode where the AI rewrites partition() to
+    swap the wrong elements: the code runs, prints a list, but the list
+    is unsorted — and our compile + no-crash checks alone would let it
+    through.
+    """
+    for match in _SORT_OUTPUT_RE.finditer(stdout):
+        list_src = match.group(1)
+        try:
+            parsed = ast.literal_eval(list_src)
+        except (ValueError, SyntaxError):
+            continue
+        if not isinstance(parsed, list) or len(parsed) < 2:
+            continue
+        # All items must be comparable numbers/strings
+        try:
+            sorted_copy = sorted(parsed)
+        except TypeError:
+            continue
+        if list(parsed) != sorted_copy:
+            return (
+                "WRONG OUTPUT: the program printed a list labelled as 'sorted' "
+                f"but it is NOT sorted. Got {parsed}, expected {sorted_copy}. "
+                "Your sort/partition logic is still broken — typical cause is "
+                "swapping the wrong elements (e.g. array[high]/array[i] when "
+                "the algorithm actually requires array[i]/array[j])."
+            )
+    return ""
+
+
 def _validate_fix_runtime(fix_code: str, timeout_s: int = 5) -> tuple[bool, str]:
     """Run the fix and verify it doesn't infinite-loop, crash, or print wrong results.
 
@@ -241,14 +282,27 @@ def _validate_fix_runtime(fix_code: str, timeout_s: int = 5) -> tuple[bool, str]
                 # final "File ... line N, in <fn>\n   <code>" + Exception live).
                 err = "...[traceback truncated]...\n" + err[-5000:]
             return False, f"RuntimeError: {err}"
-        # Output sanity: if the script searches for a value that's clearly in
-        # the data and prints "Not found", the fix is wrong even though it ran.
-        out = (result.stdout or "").lower()
-        if "not found" in out and "found at" not in out:
+        # Output sanity checks — catch fixes that compile and run but
+        # produce semantically wrong results.
+        out = (result.stdout or "")
+        out_lower = out.lower()
+
+        # 1. Searches that print "Not found" when the value should be findable.
+        if "not found" in out_lower and "found at" not in out_lower:
             return False, (
                 "WRONG OUTPUT: code prints 'Not found' but the searched value "
                 "should be findable. The logic is still incorrect."
             )
+
+        # 2. Sort outputs that are not actually sorted. Triggers on lines like
+        #    'Sorted array: [5, 22, 64, 25, 34, 12, 11, 90]'
+        # which the AI sometimes produces after a partition() rewrite that
+        # swaps the wrong elements — code runs, output looks plausible, but
+        # the algorithm is broken.
+        sort_check = _check_sort_output(out)
+        if sort_check:
+            return False, sort_check
+
         return True, ""
     except subprocess.TimeoutExpired:
         return False, f"INFINITE LOOP: code did not finish within {timeout_s}s — your fix still has a bug"

@@ -141,6 +141,20 @@ PROTOCOL — MULTI-BUG ANALYSIS
    identified issues. Do NOT perform patchwork fixes that solve one bug
    while ignoring others — patchwork does not converge for multi-bug files.
 
+4. SCOPE DISCIPLINE — CRITICAL
+   Do NOT rewrite code that is already correct. If the bug list points
+   at lines 19-20 (forgotten function calls in `quicksort`), do NOT
+   touch the body of `partition` or other functions that work as-is.
+   Rewriting working code from memory frequently introduces NEW logic
+   bugs (e.g. swapping array[high]/array[i] when the algorithm
+   actually requires array[i]/array[j]) — those bugs compile, run
+   without crashing, and produce subtly wrong output that defeats the
+   runtime validator.
+
+   If you MUST change a working function, mentally trace the algorithm
+   on a 5-element example before submitting. For sort/partition code,
+   verify the output is actually sorted.
+
 ==============================================================================
 ITERATION & MEMORY
 ==============================================================================
