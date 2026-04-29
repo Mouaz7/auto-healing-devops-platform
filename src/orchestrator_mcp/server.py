@@ -172,37 +172,97 @@ class OrchestratorMCPServer(MCPServiceBase):
             build_id, correlation_id, repo,
         )
 
+        # Run the heavy pipeline in the background so the HTTP caller (a
+        # GitHub Actions runner with a finite curl --max-time, typically
+        # 240 s) does not block waiting for the LLM. The pipeline can
+        # legitimately take 5-10 min for high-bug-density files: cleaner
+        # call + analyser call + LLM with retries + validation. Returning
+        # 202 immediately lets Actions move on; the build status is
+        # observable via /tools/get_workflow_state and the resulting PR
+        # appears asynchronously.
+        if data.get("sync") is True:
+            return await self._run_pipeline_sync(
+                build_id, raw_log, repo, correlation_id
+            )
+
+        asyncio.create_task(
+            self._run_pipeline_background(build_id, raw_log, repo, correlation_id)
+        )
+        return web.json_response(
+            {
+                "build_id": build_id,
+                "status": "ACCEPTED",
+                "message": "auto-heal pipeline started — poll /tools/get_workflow_state for progress",
+                "correlation_id": correlation_id,
+            },
+            status=202,
+        )
+
+    async def _run_pipeline_sync(
+        self, build_id: str, raw_log: str, repo: str, correlation_id: str,
+    ) -> web.Response:
+        """Synchronous pipeline run — blocks until the pipeline finishes.
+        Used by tests and by callers that explicitly pass `"sync": true`.
+        """
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             try:
                 result = await self._run_pipeline(
                     client, build_id, raw_log, repo, correlation_id
                 )
             except Exception as exc:  # pylint: disable=broad-exception-caught
-                import traceback
-                tb = traceback.format_exc()
-                err_str = str(exc) or repr(exc) or f"{type(exc).__name__}(no message)"
-                logger.error(
-                    "pipeline_exception build_id=%s type=%s str=%r repr=%r\n%s",
-                    build_id, type(exc).__name__, str(exc), repr(exc), tb,
-                )
-                # Extract files from raw_log so the fallback Slack shows them
-                fallback_files: list[str] = []
-                if raw_log:
-                    for m in re.finditer(r"FAILED_FILE:\s*(\S+\.py)", raw_log):
-                        f = m.group(1).strip().lstrip("./")
-                        if f and f not in fallback_files:
-                            fallback_files.append(f)
-                handle_agent_failure("orchestrator", build_id, err_str, fallback_files)
-                self._safe_fail(build_id, err_str)
-                await trigger_global_fallback("orchestrator", build_id, err_str, fallback_files)
-                audit.log("pipeline_failed", build_id=build_id, error=err_str)
+                err_str = self._handle_pipeline_exception(build_id, raw_log, exc)
                 return web.json_response(
                     {"build_id": build_id, "status": "FAILED", "error": err_str,
                      "type": type(exc).__name__},
                     status=500,
                 )
-
         return web.json_response(result)
+
+    async def _run_pipeline_background(
+        self, build_id: str, raw_log: str, repo: str, correlation_id: str,
+    ) -> None:
+        """Background pipeline runner — exceptions are swallowed and logged;
+        the caller already received 202 and cannot be informed of failures
+        synchronously. State is persisted via the engine so it can be
+        polled.
+        """
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            try:
+                await self._run_pipeline(
+                    client, build_id, raw_log, repo, correlation_id
+                )
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                self._handle_pipeline_exception(build_id, raw_log, exc)
+
+    def _handle_pipeline_exception(
+        self, build_id: str, raw_log: str, exc: Exception,
+    ) -> str:
+        """Common exception handling for sync and background pipeline runs.
+        Returns the formatted error string so the sync path can include it
+        in the HTTP response body.
+        """
+        import traceback
+        tb = traceback.format_exc()
+        err_str = str(exc) or repr(exc) or f"{type(exc).__name__}(no message)"
+        logger.error(
+            "pipeline_exception build_id=%s type=%s str=%r repr=%r\n%s",
+            build_id, type(exc).__name__, str(exc), repr(exc), tb,
+        )
+        fallback_files: list[str] = []
+        if raw_log:
+            for m in re.finditer(r"FAILED_FILE:\s*(\S+\.py)", raw_log):
+                f = m.group(1).strip().lstrip("./")
+                if f and f not in fallback_files:
+                    fallback_files.append(f)
+        handle_agent_failure("orchestrator", build_id, err_str, fallback_files)
+        self._safe_fail(build_id, err_str)
+        # trigger_global_fallback is async — fire-and-forget so callers
+        # (sync and background) both work.
+        asyncio.create_task(
+            trigger_global_fallback("orchestrator", build_id, err_str, fallback_files)
+        )
+        audit.log("pipeline_failed", build_id=build_id, error=err_str)
+        return err_str
 
     async def _run_pipeline(
         self,

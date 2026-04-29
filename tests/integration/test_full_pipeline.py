@@ -164,7 +164,7 @@ async def test_green_path(orch_client):
     _setup_green(respx.mock)
     resp = await orch_client.post(
         "/tools/handle_build_failure",
-        json={"build_id": "e2e-g-001", "raw_log": "FAILED tests/test.py\nAssertionError", "repo": "org/repo"},
+        json={"build_id": "e2e-g-001", "raw_log": "FAILED tests/test.py\nAssertionError", "repo": "org/repo", "sync": True},
     )
     assert resp.status == 200
     body = await resp.json()
@@ -180,7 +180,7 @@ async def test_yellow_path(orch_client):
     _setup_yellow(respx.mock)
     resp = await orch_client.post(
         "/tools/handle_build_failure",
-        json={"build_id": "e2e-y-001", "raw_log": "FAILED tests/test.py\nAssertionError", "repo": "org/repo"},
+        json={"build_id": "e2e-y-001", "raw_log": "FAILED tests/test.py\nAssertionError", "repo": "org/repo", "sync": True},
     )
     assert resp.status == 200
     body = await resp.json()
@@ -205,7 +205,7 @@ async def test_missing_raw_log_returns_400(orch_client):
     """No raw_log → 400."""
     resp = await orch_client.post(
         "/tools/handle_build_failure",
-        json={"build_id": "e2e-nolog", "repo": "org/repo"},
+        json={"build_id": "e2e-nolog", "repo": "org/repo", "sync": True},
     )
     assert resp.status == 400
 
@@ -215,7 +215,7 @@ async def test_missing_raw_log_returns_400(orch_client):
 async def test_duplicate_build_id_returns_409(orch_client):
     """Same build_id submitted twice → 409 on the second call."""
     _setup_green(respx.mock)
-    payload = {"build_id": "e2e-dup", "raw_log": "AssertionError", "repo": "r/r"}
+    payload = {"build_id": "e2e-dup", "raw_log": "AssertionError", "repo": "r/r", "sync": True}
 
     r1 = await orch_client.post("/tools/handle_build_failure", json=payload)
     assert r1.status == 200
@@ -247,7 +247,7 @@ async def test_stats_endpoint_structure(orch_client):
     _setup_green(respx.mock)
     await orch_client.post(
         "/tools/handle_build_failure",
-        json={"build_id": "e2e-stats", "raw_log": "AssertionError", "repo": "r/r"},
+        json={"build_id": "e2e-stats", "raw_log": "AssertionError", "repo": "r/r", "sync": True},
     )
     resp = await orch_client.get("/api/stats")
     assert resp.status == 200
@@ -292,7 +292,7 @@ async def test_rate_limiting_triggers_429(orch_client):
     for i in range(12):
         resp = await orch_client.post(
             "/tools/handle_build_failure",
-            json={"build_id": f"e2e-rl-{i:03d}", "raw_log": "err", "repo": "r/r"},
+            json={"build_id": f"e2e-rl-{i:03d}", "raw_log": "err", "repo": "r/r", "sync": True},
         )
         statuses.append(resp.status)
     assert 429 in statuses, f"Expected a 429 among {statuses}"
@@ -306,7 +306,7 @@ async def test_deduplication_blocks_repeat_error(orch_client):
 
     r1 = await orch_client.post(
         "/tools/handle_build_failure",
-        json={"build_id": "e2e-dd-001", "raw_log": "AssertionError in calc", "repo": "r/r"},
+        json={"build_id": "e2e-dd-001", "raw_log": "AssertionError in calc", "repo": "r/r", "sync": True},
     )
     assert r1.status == 200
 
@@ -314,7 +314,7 @@ async def test_deduplication_blocks_repeat_error(orch_client):
     _setup_green(respx.mock)
     r2 = await orch_client.post(
         "/tools/handle_build_failure",
-        json={"build_id": "e2e-dd-002", "raw_log": "AssertionError in calc", "repo": "r/r"},
+        json={"build_id": "e2e-dd-002", "raw_log": "AssertionError in calc", "repo": "r/r", "sync": True},
     )
     assert r2.status == 200
     body2 = await r2.json()
@@ -328,7 +328,7 @@ async def test_oversized_log_returns_413(orch_client):
     """raw_log > 500 KB → 413 Payload Too Large."""
     resp = await orch_client.post(
         "/tools/handle_build_failure",
-        json={"build_id": "e2e-big", "raw_log": "x" * 600_000, "repo": "r/r"},
+        json={"build_id": "e2e-big", "raw_log": "x" * 600_000, "repo": "r/r", "sync": True},
     )
     assert resp.status == 413
     body = await resp.json()
@@ -344,7 +344,7 @@ async def test_fix_memory_recorded_after_green_pipeline(orch_client):
     _setup_green(respx.mock)
     resp = await orch_client.post(
         "/tools/handle_build_failure",
-        json={"build_id": "e2e-mem-001", "raw_log": "FAILED tests/test_sample.py AssertionError", "repo": "r/r"},
+        json={"build_id": "e2e-mem-001", "raw_log": "FAILED tests/test_sample.py AssertionError", "repo": "r/r", "sync": True},
     )
     assert resp.status == 200
     body = await resp.json()
