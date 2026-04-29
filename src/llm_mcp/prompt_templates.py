@@ -363,32 +363,7 @@ INSTRUCTIONS:
   ✓ Keep the same function names and purpose
   ✓ Return correct values (-1 for not found, etc.)"""
 
-SCENARIO_B_TEMPLATE = """\
-Task Description:
-{task_description}
-
-Existing Code Context:
-{code_context}
-
-Generate code to implement this feature. Keep it minimal."""
-
-# Few-shot examples prepended to the user message for context calibration
-FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
-    {
-        "error": "ImportError: cannot import name 'Validator' from 'utils'",
-        "context": "# utils.py\nclass InputValidator:\n    pass",
-        "fix": "from utils import InputValidator  # Was: from utils import Validator",
-    },
-    {
-        "error": "SyntaxError: expected ':'",
-        "context": "def process(data: str) -> dict\n    return {}",
-        "fix": "def process(data: str) -> dict:\n    return {}",
-    },
-]
-
-MAX_FIX_LINES = 100         # Surgical mode: max lines changed (covers small full-file rewrites)
-MAX_FIX_LINES_COMPLEX = 600 # Complex mode: allow full file rewrite
-MAX_RETRIES = 8             # 9 attempts total — handles files with 10+ interacting bugs
-LLM_TIMEOUT_SECONDS = 120
-# Number of detected bugs that triggers COMPLEX mode (full rewrite instead of surgical)
-COMPLEX_MODE_THRESHOLD = 3
+MAX_FIX_LINES = 100          # Surgical mode: max lines changed
+MAX_FIX_LINES_COMPLEX = 600  # Complex mode: allow full file rewrite
+MAX_RETRIES = 8              # 9 attempts total — handles files with 10+ interacting bugs
+COMPLEX_MODE_THRESHOLD = 3   # Bug count that triggers full-rewrite mode

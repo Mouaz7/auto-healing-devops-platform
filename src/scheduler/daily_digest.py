@@ -28,11 +28,10 @@ Env vars:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 import httpx
 
@@ -80,7 +79,7 @@ class DailyDigest:
         from src.shared.adaptive_thresholds import adaptive_thresholds
         from src.shared.heal_verifier import heal_verifier
 
-        today = datetime.now(timezone.utc).strftime("%A, %B %-d")
+        today = datetime.now(UTC).strftime("%A, %B %-d")
         stats = fix_memory.stats()
         cost  = cost_tracker.session_summary()
 
@@ -220,15 +219,3 @@ class DailyDigest:
         )
 
 
-async def run_digest_loop() -> None:
-    """Long-running loop that sends the digest once per day at DIGEST_HOUR UTC."""
-    digest = DailyDigest()
-    logger.info("daily_digest_loop_started send_hour_utc=%d", _DIGEST_HOUR)
-    while True:
-        now = datetime.now(timezone.utc)
-        if now.hour == _DIGEST_HOUR and now.minute < 5:
-            await digest.send()
-            # Sleep 23 h to avoid double-sending
-            await asyncio.sleep(23 * 3600)
-        else:
-            await asyncio.sleep(60)   # check every minute

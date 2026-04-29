@@ -34,7 +34,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-REGRESSION_WINDOW_MINUTES = int(60)   # configurable via subclass / env var
+REGRESSION_WINDOW_MINUTES = 60   # configurable via subclass / env var
 
 
 @dataclass

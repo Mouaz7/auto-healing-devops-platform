@@ -1,14 +1,11 @@
-"""Resilience utilities — circuit breaker, retry, global fallback."""
+"""Resilience utilities — circuit breaker + global fallback notifier."""
 from __future__ import annotations
 
-import asyncio
 import logging
-import random
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from enum import Enum
-from typing import Any, Awaitable, Callable, TypeVar
 
 import httpx
 
@@ -16,8 +13,6 @@ from src.shared.config import SERVICE_URLS
 from src.shared.metrics import agent_fallback_triggered
 
 logger = logging.getLogger(__name__)
-
-T = TypeVar("T")
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +48,7 @@ def handle_agent_failure(failed_agent: str,
         "reason": "agent_failure",
         "failed_agent": failed_agent,
         "message": f"Agent {failed_agent} failed: {reason}",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "confidence": 0.0,
         "blast_radius": "HIGH",
         "error_type": "UNKNOWN",
@@ -82,29 +77,6 @@ async def trigger_global_fallback(failed_agent: str,
             )
     except (httpx.HTTPError, httpx.TimeoutException) as exc:
         logger.error("global_fallback_notification_failed error=%s", exc)
-
-
-def validate_agent_output(agent_name: str,
-                           output: dict[str, Any],
-                           required_fields: list[str]) -> bool:
-    """Validate that an agent's output contains all required fields.
-
-    Args:
-        agent_name: Name of the agent (for logging).
-        output: The dict returned by the agent.
-        required_fields: List of field names that must be present.
-
-    Returns:
-        True if all fields present, False otherwise.
-    """
-    missing = [f for f in required_fields if f not in output]
-    if missing:
-        logger.error(
-            "invalid_agent_output agent=%s missing=%s",
-            agent_name, missing,
-        )
-        return False
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -180,61 +152,3 @@ class CircuitBreaker:
             logger.warning("circuit_breaker_tripped name=%s", self.name)
 
 
-# Singletons per external service
-circuit_breakers: dict[str, CircuitBreaker] = {
-    "llm_api":       CircuitBreaker("llm_api"),
-    "github_api":    CircuitBreaker("github_api"),
-    "jenkins_api":   CircuitBreaker("jenkins_api"),
-    "teams_webhook": CircuitBreaker("teams_webhook"),
-    "slack_webhook": CircuitBreaker("slack_webhook"),
-}
-
-
-# ---------------------------------------------------------------------------
-# Retry helper
-# ---------------------------------------------------------------------------
-
-async def with_retry(
-    coro_fn: Callable[[], Awaitable[T]],
-    max_retries: int = 3,
-    delays: list[float] | None = None,
-    jitter: float = 0.25,
-) -> T:
-    """Run a coroutine with exponential backoff retry + jitter.
-
-    Jitter (±jitter * delay) prevents the thundering-herd problem where many
-    services retry simultaneously after a shared dependency recovers.
-
-    Args:
-        coro_fn: Zero-argument async callable to retry.
-        max_retries: Maximum number of retries (default 3).
-        delays: Base seconds between attempts (default [1, 2, 4]).
-                Last value is reused if attempts exceed list length.
-        jitter: Fraction of delay to randomise (default ±25%).
-
-    Returns:
-        Result of coro_fn on success.
-
-    Raises:
-        The last exception if all retries are exhausted.
-    """
-    if delays is None:
-        delays = [1.0, 2.0, 4.0]
-
-    last_error: Exception | None = None
-    for attempt in range(max_retries + 1):
-        try:
-            return await coro_fn()
-        except (httpx.HTTPError, httpx.TimeoutException, OSError, RuntimeError) as exc:
-            last_error = exc
-            if attempt < max_retries:
-                base = delays[min(attempt, len(delays) - 1)]
-                # Full jitter: uniform(base*(1-jitter), base*(1+jitter))
-                sleep_for = base * (1.0 + random.uniform(-jitter, jitter))
-                logger.warning(
-                    "retry attempt=%d/%d sleep=%.2fs error=%s",
-                    attempt + 1, max_retries, sleep_for, exc,
-                )
-                await asyncio.sleep(sleep_for)
-
-    raise last_error  # type: ignore[misc]

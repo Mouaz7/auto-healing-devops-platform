@@ -52,9 +52,7 @@ AGENT_CONFIGS: dict[str, AgentModelConfig] = {
     "review_notify":    _load("REVIEW_NOTIFY",    2_000, 20_000, 4_000, 20),
 }
 
-# Global budget
-GLOBAL_TOKEN_BUDGET_PER_HOUR: int = 135_000
-GLOBAL_MAX_CONCURRENT_PIPELINES: int = 3
+GLOBAL_MAX_CONCURRENT_PIPELINES: int = 3  # referenced by tests/integration/test_load.py
 TOKEN_BUDGET_WARNING_PCT: float = 0.80
 
 # Internal service URLs (set via docker-compose environment)
@@ -67,3 +65,11 @@ SERVICE_URLS: dict[str, str] = {
     "llm":            os.getenv("LLM_URL",            "http://localhost:8086"),
     "notification":   os.getenv("NOTIFICATION_URL",   "http://localhost:8087"),
 }
+
+# Per-call HTTP timeouts (seconds). Tunable via env so ops can adjust without redeploy.
+# generate_fix can take up to LLM-mcp's full retry budget (≈9 × 120 s + overhead).
+# Set higher than that ceiling so the orchestrator never times out before LLM-mcp
+# finishes legitimate retries — the alternative is a premature ReadTimeout that
+# triggers global_fallback and a late RED Slack alert.
+LLM_FIX_TIMEOUT: float = float(os.getenv("LLM_FIX_TIMEOUT", "1200"))
+GERRIT_FETCH_TIMEOUT: float = float(os.getenv("GERRIT_FETCH_TIMEOUT", "10"))

@@ -33,7 +33,7 @@ import json
 import logging
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any
 
@@ -101,7 +101,7 @@ class FixMemory:
     ) -> None:
         """Persist one fix attempt to the memory store."""
         entry: dict[str, Any] = {
-            "ts":                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "ts":                datetime.now(UTC).isoformat(timespec="seconds"),
             "build_id":          build_id,
             "error_type":        error_type,
             "root_cause_hash":   _fingerprint(root_cause),
@@ -122,7 +122,7 @@ class FixMemory:
     def update_outcome(self, build_id: str, approved: bool) -> None:
         """Append an approval/rejection stamp for a previously recorded fix."""
         entry: dict[str, Any] = {
-            "ts":       datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "ts":       datetime.now(UTC).isoformat(timespec="seconds"),
             "build_id": build_id,
             "_update":  True,
             "approved": approved,
@@ -219,9 +219,8 @@ class FixMemory:
     def _append(self, entry: dict) -> None:
         line = json.dumps(entry, default=str) + "\n"
         try:
-            with self._lock:
-                with open(self._path, "a", encoding="utf-8") as fh:
-                    fh.write(line)
+            with self._lock, open(self._path, "a", encoding="utf-8") as fh:
+                fh.write(line)
         except OSError as exc:
             logger.warning("fix_memory_write_failed error=%s", exc)
 

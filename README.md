@@ -1,7 +1,7 @@
 # Auto-Healing AI DevOps Platform
 
 [![Built with Claude Code](https://img.shields.io/badge/Built%20with-Claude%20Code-orange?logo=anthropic)](https://claude.ai/code)
-[![Tests](https://img.shields.io/badge/tests-601%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-540%20passing-brightgreen)](tests/)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://python.org)
 [![License](https://img.shields.io/badge/thesis-BTH%202026-lightgrey)](https://www.bth.se)
 
@@ -475,10 +475,10 @@ Five independent optimization layers working together:
 | Layer | Module | Mechanism | Typical saving |
 |-------|--------|-----------|----------------|
 | **Log compression** | `prompt_compressor.py` | Keep error lines only | ~90% token reduction |
-| **Model routing** | `model_router.py` | Route LOW complexity to 7B models | ~60% cost reduction on simple bugs |
 | **Deduplication** | `deduplication.py` | Skip pipeline for repeated errors | 100% saving for repeated failures |
 | **Fix memory** | `fix_memory.py` | Inject only 3 past examples, capped at 800 chars | Avoids unbounded context growth |
 | **Per-agent budgets** | `config.py` | Hard token limits per agent per hour | Prevents runaway costs |
+| **Surgical patches** | `fix_parsers.py` | LLM returns `changed_lines` only (1-based line edits) | ~70% smaller fixes, fewer retries |
 
 ### Deduplication Cache (`src/orchestrator_mcp/deduplication.py`)
 
@@ -502,13 +502,9 @@ Independent circuit breaker for each external dependency:
 
 **States:** CLOSED (normal) → OPEN (5 failures within 60s) → HALF_OPEN (30s cooldown) → CLOSED (on success)
 
-### Retry with Exponential Backoff + Jitter
+### Per-Agent Internal Retries
 
-`with_retry()` wraps any async coroutine with:
-- Delays: `[1s, 2s, 4s]` by default
-- **Jitter:** ±25% of each delay (`uniform(base × 0.75, base × 1.25)`)
-- Catches: `httpx.HTTPError`, `httpx.TimeoutException`, `OSError`, `RuntimeError`
-- Jitter prevents thundering-herd when many services retry after a shared dependency recovers
+Each agent that calls the LLM (Agents 4, 5) carries its own retry policy with exponential backoff. The orchestrator's per-call HTTP timeouts (`LLM_FIX_TIMEOUT=1200s`, `GERRIT_FETCH_TIMEOUT=10s`) are configured to exceed these internal budgets so retries always finish before the outer connection times out.
 
 ### Global Fallback
 
@@ -766,13 +762,11 @@ Every pipeline event is appended to an append-only JSONL file:
 | `config.py` | `AgentModelConfig` dataclass, `AGENT_CONFIGS` dict, `SERVICE_URLS`, global token budget |
 | `nim_client.py` | NVIDIA NIM OpenAI-compatible client. `NimClient.complete()` with 4-slot fallback chain, token tracking, structured logging |
 | `model_fallback.py` | `ModelFallbackManager` — tracks current slot, switches on failure, resets on success, raises `AllModelsFailed` |
-| `model_router.py` | `route_model(complexity)` returns slot override dict. `complexity_label()` returns human-readable string for logging and Slack |
 | `task_complexity.py` | `score_complexity()` returns `Complexity.LOW/MEDIUM/HIGH`. Deterministic — no AI needed, instant scoring |
-| `resilience.py` | `CircuitBreaker`, `with_retry()` (exponential backoff + jitter), `handle_agent_failure()`, `trigger_global_fallback()`, `validate_agent_output()` |
+| `resilience.py` | `CircuitBreaker`, `handle_agent_failure()`, `trigger_global_fallback()` |
 | `quality_gates.py` | `run_bandit_scan()`, `run_pylint_check()`, `evaluate_quality()`. Uses `tempfile.NamedTemporaryFile` (no security vulnerability) |
 | `secret_scanner.py` | `scan_for_secrets()`. 11 regex patterns, safe-pattern exclusions, `SecretScanResult` dataclass |
 | `prompt_compressor.py` | `compress_log()`. Error-aware log compression with context window and hard truncation |
-| `diff_generator.py` | `generate_diff()`, `generate_multi_file_diff()`, `format_diff_for_slack()`. Uses Python `difflib.unified_diff` |
 | `fix_memory.py` | `FixMemory` class: `record()`, `update_outcome()`, `query()` (Jaccard similarity), `stats()`. `build_memory_context()` formats for LLM prompts |
 | `adaptive_thresholds.py` | `AdaptiveThresholds`: `record_decision()`, `get_thresholds()`, `summary()`. Self-calibrating per error type |
 | `heal_verifier.py` | `HealVerifier`: `record_fix()`, `check_regression()`, `active_fixes()`. 60-minute regression watch window |
@@ -780,29 +774,39 @@ Every pipeline event is appended to an append-only JSONL file:
 | `cost_tracker.py` | Per-build API cost estimation. `CostTracker.record()`, `session_summary()`. Pricing tiers by model size |
 | `token_tracker.py` | Thread-safe per-agent token counting with hourly reset. `usage_snapshot()` |
 | `metrics.py` | Prometheus counters, histograms, and gauges. `generate_metrics_output()` |
-| `logging_setup.py` | Structlog configuration for JSON-formatted structured logging |
-| `mcp_base.py` | `MCPServiceBase` — base class for all 8 aiohttp services. Registers `/health` and `/metrics` |
+| `mcp_base.py` | `MCPServiceBase` — base class for all aiohttp services. Registers `/health` and `/metrics` |
 
 ### `src/orchestrator_mcp/` — Central Pipeline Controller
 
+The orchestrator was originally one 1253-line `server.py`. It has been split into focused mixin modules (each ≤ ~480 lines) so each area can be edited and debugged in isolation:
+
 | Module | Description |
 |--------|-------------|
-| `server.py` | `OrchestratorMCPServer`. Full pipeline orchestration, all webhook handlers, `/api/stats`, background pruner task |
+| `server.py` | `OrchestratorMCPServer` — thin shell composing the mixins below + lifecycle (pruner) |
+| `pipeline_mixin.py` | `handle_build_failure` + the Agent 3→4→5→6 pipeline split into per-step methods (`_step_clean_logs`, `_step_analyse`, `_step_fetch_context`, `_step_generate_fix`, `_step_notify`, `_finalise`) |
+| `pipeline_helpers.py` | Pure helpers — FAILED_FILE regex, ERROR_TYPE map, FILE_CONTENT extractor |
+| `github_mixin.py` | PR creation, auto-merge, GitHub webhook + HMAC signature verify |
+| `slack_mixin.py` | Slack interactive Approve / Reject button handler |
+| `workflow_api_mixin.py` | REST CRUD for workflows |
+| `admin_mixin.py` | `/api/stats`, `retry_build`, `review_code` (AI-triggered healing) |
 | `workflow.py` | `WorkflowEngine` state machine. `VALID_TRANSITIONS` graph. `prune_stale()`, `stats()` |
 | `deduplication.py` | `DeduplicationCache`. MD5 fingerprinting of error signatures. 24h cache window |
 | `rate_limiter.py` | `RateLimiter`. Sliding-window counter per IP. Thread-safe deque |
-| `scenario_router.py` | Routes Scenario A (bug fix) vs Scenario B (feature) to correct pipeline |
 | `traffic_light.py` | Legacy traffic light module (orchestrator-side copy) |
 | `tools.py` | MCP tool definitions for orchestrator |
 
 ### `src/llm_mcp/` — Code Repairer
 
+`fix_generator.py` was originally 757 lines. The validators, prompt-builder, and parser have been extracted so the main file focuses on the LLM retry loop:
+
 | Module | Description |
 |--------|-------------|
-| `fix_generator.py` | `FixGenerator.generate_fix()`. Integrates: log compression, fix memory, complexity scoring, secret scanner, bandit, pylint, retry logic |
-| `prompt_templates.py` | `SYSTEM_PROMPT`, `SCENARIO_A_TEMPLATE` (with `{memory_context}` slot), `SCENARIO_B_TEMPLATE`, `FEW_SHOT_EXAMPLES` |
+| `fix_generator.py` | `FixGenerator.generate_fix()` — the retry loop. Integrates log compression, fix memory, complexity scoring, secret scanner, bandit, pylint |
+| `fix_validators.py` | Static + runtime gates (AST parse, self-assignment detector, sandboxed subprocess run, sort-output sanity) |
+| `fix_prompts.py` | `build_retry_prompt()` (with stuck-loop detection), `extract_bug_list()` |
+| `fix_parsers.py` | `apply_surgical_patch()`, `parse_response()` |
+| `prompt_templates.py` | `SYSTEM_PROMPT`, `SCENARIO_A_TEMPLATE`, `COMPLEX_REPAIR_TEMPLATE`, line-count constants |
 | `quality_check.py` | Additional quality checks for generated code |
-| `summary_writer.py` | Generates human-readable fix summaries |
 | `server.py` | aiohttp server for Agent 5 |
 | `tools.py` | MCP tool definitions |
 
@@ -832,7 +836,8 @@ Every pipeline event is appended to an append-only JSONL file:
 |--------|-------------|
 | `traffic_light_evaluator.py` | `evaluate_traffic_light()` with adaptive thresholds |
 | `slack_notifier.py` | `send_slack_review_buttons()`. Block Kit templates for GREEN/YELLOW/RED. Approve/Reject button construction |
-| `slack_slash_handler.py` | 9 slash commands with HMAC-SHA256 verification |
+| `slack_slash_handler.py` | 9 slash commands with HMAC-SHA256 verification — one `_cmd_*` function per sub-command |
+| `slash_responses.py` | Pure response builders (status / list / stats / explain / history / top / thresholds blocks) |
 | `teams_notifier.py` | Microsoft Teams adaptive card notifications |
 | `server.py` | aiohttp server for Agent 6 |
 
@@ -842,7 +847,7 @@ Every pipeline event is appended to an append-only JSONL file:
 |--------|-------------|
 | `monitor.py` | `ScheduledMonitor`. Polls GitHub Issues / Jira. Routes tasks via TaskClassifier |
 | `task_classifier.py` | `TaskClassifier`. Regex heuristics → NIM LLM for A/B/YELLOW classification |
-| `daily_digest.py` | `DailyDigest.send()`. Builds Slack Block Kit report from live stats. `run_digest_loop()` |
+| `daily_digest.py` | `DailyDigest.send()`. Builds Slack Block Kit report from live stats |
 
 ### `src/gerrit_mcp/` — GitHub PR Manager
 
@@ -866,51 +871,46 @@ Every pipeline event is appended to an append-only JSONL file:
 
 ## 19. Test Suite
 
-**604 tests total — 601 passing** (3 skipped without live Docker services).
+**540 tests passing** (21 skipped — they require live Docker services or were tied to dead-code modules removed during the cleanup).
 
-### Unit Tests — `tests/unit/` (537 tests)
+### Unit Tests — `tests/unit/`
 
-| Category | File(s) | Tests | Coverage |
-|----------|---------|-------|---------|
-| **Fix Memory** | `test_fix_memory.py` | 14 | record, query, Jaccard similarity, approval stamps, stats, context formatting |
-| **Adaptive Thresholds** | `test_adaptive_thresholds.py` | 13 | calibration algorithm, safe bounds, cache invalidation |
-| **Heal Verifier** | `test_heal_verifier.py` | 13 | regression detection, file overlap, expiry window, same-build guard |
-| **Secret Scanner** | `test_secret_scanner.py` | 12 | all 11 pattern types, safe exclusions, line numbers reported |
-| **Prompt Compressor** | `test_prompt_compressor.py` | 11 | error preservation, size limits, head/tail sections, noise removal |
-| **Diff Generator** | `test_diff_generator.py` | 11 | unified diff, multi-file diff, Slack formatting, truncation |
-| **Task Complexity** | `test_task_complexity.py` | 8 | scoring algorithm, boundary conditions (LOW/MEDIUM/HIGH) |
-| **Task Classifier** | `test_task_classifier.py` | 27 | Scenario A/B classification, keyword routing, NIM fallback, YELLOW escalation |
-| **Circuit Breaker** | `test_circuit_breaker.py` | 12+ | CLOSED→OPEN→HALF_OPEN→CLOSED state transitions |
-| **Model Fallback** | `test_model_fallback.py` | 10+ | fallback chain, AllModelsFailed, slot reset |
-| **Token Tracker** | `test_token_tracker.py` | 8+ | thread safety, hourly reset, usage snapshot |
-| **Quality Gates** | `test_quality_gates.py` | 10+ | bandit scan, pylint check, confidence modifier |
-| **Resilience Async** | `test_resilience_async.py` | 12 | with_retry, global fallback, validate_agent_output |
-| **Models** | `test_models.py` | 10+ | dataclass fields, enum values, serialisation |
-| **Performance** | `test_performance.py` | 5+ | throughput benchmarks |
-| **Workflow Engine** | `test_workflow.py` | 15+ | state transitions, InvalidTransitionError, pruning |
-| **GitHub Webhook** | `test_github_webhook.py` | 8+ | HMAC signature verification, branch parsing |
-| **Traffic Light** | `test_traffic_light.py` + `test_edge_cases.py` | 15+ | adaptive thresholds, safety override, score formula |
-| **Log Cleaner** | `test_pipeline.py` + 5 filter tests | 30+ | each filter individually, full pipeline combination |
-| **Error Analyst** | `test_failure_analyser.py` + `test_edge_cases.py` | 20+ | all 6 error types, pytest format, blast radius |
-| **Code Repairer** | `test_fix_generator.py` + others | 20+ | parsing, retry, FixTooLongError, SecretLeakError |
-| **Gerrit MCP** | 4 test files | 20+ | PR creation, rate-limit headers, code fetching |
-| **Notifiers** | 3 test files | 15+ | Block Kit rendering, Slack/Teams notifications |
-| **Scenario Router** | `test_scenario_router.py` | 10+ | A/B routing |
-| **Scheduler** | `test_scheduler_monitor.py` | 8+ | task polling, classification |
+| Category | File(s) | Coverage |
+|----------|---------|---------|
+| **Fix Memory** | `test_fix_memory.py` | record, query, Jaccard similarity, approval stamps, stats |
+| **Adaptive Thresholds** | `test_adaptive_thresholds.py` | calibration algorithm, safe bounds, cache invalidation |
+| **Heal Verifier** | `test_heal_verifier.py` | regression detection, file overlap, expiry window |
+| **Secret Scanner** | `test_secret_scanner.py` | all 11 pattern types, safe exclusions |
+| **Prompt Compressor** | `test_prompt_compressor.py` | error preservation, size limits, head/tail sections |
+| **Task Complexity** | `test_task_complexity.py` | scoring algorithm, LOW/MEDIUM/HIGH boundaries |
+| **Task Classifier** | `test_task_classifier.py` | Scenario A/B classification, NIM fallback, YELLOW escalation |
+| **Circuit Breaker** | `test_circuit_breaker.py` | CLOSED→OPEN→HALF_OPEN→CLOSED transitions |
+| **Model Fallback** | `test_model_fallback.py` | fallback chain, AllModelsFailed, slot reset |
+| **Token Tracker** | `test_token_tracker.py` | thread safety, hourly reset, usage snapshot |
+| **Quality Gates** | `test_quality_gates.py` | bandit scan, pylint check, confidence modifier |
+| **Resilience Async** | `test_resilience_async.py` | global fallback notifier — RED payload |
+| **Models** | `test_models.py` | dataclass fields, enum values, serialisation |
+| **Workflow Engine** | `test_workflow.py` | state transitions, InvalidTransitionError, pruning |
+| **GitHub Webhook** | `test_github_webhook.py` | HMAC signature verification, branch parsing |
+| **Traffic Light** | `test_traffic_light.py` + `test_edge_cases.py` | adaptive thresholds, safety override, score formula |
+| **Log Cleaner** | `test_pipeline.py` + 5 filter tests | each filter individually, full pipeline combination |
+| **Error Analyst** | `test_failure_analyser.py` + `test_edge_cases.py` | all 6 error types, pytest format, blast radius |
+| **Code Repairer** | `test_fix_generator.py` + edge cases | parsing, retry, FixTooLongError, SecretLeakError |
+| **Gerrit MCP** | 4 test files | PR creation, rate-limit headers, code fetching |
+| **Notifiers** | 3 test files | Block Kit rendering, Slack/Teams notifications |
+| **Scheduler** | `test_scheduler_monitor.py` | task polling, classification |
 
-### Integration Tests — `tests/integration/` (67 tests, 3 require Docker)
+### Integration Tests — `tests/integration/`
 
-| File | Tests | What it tests |
-|------|-------|---------------|
-| `test_full_pipeline.py` | 12 | GREEN/YELLOW path, 400/409/413/429 errors, dedup, fix_memory recording |
-| `test_analysis_pipeline.py` | 10 | Log cleaner → error analyst chain, traffic light green/yellow/red, safety override |
-| `test_scenario_a.py` | 7 | End-to-end Scenario A (bug fix) |
-| `test_scenario_b.py` | 6 | End-to-end Scenario B (feature request) |
-| `test_global_fallback.py` | 12 | Agent crash → RED notification, FAILED workflow state |
-| `test_quality_gates_integration.py` | 3 | Bandit + Pylint in pipeline context |
-| `test_webhook_to_clean.py` | 5 | Webhook event → log cleaner flow |
-| `test_smoke.py` | 4 | ⚠️ Live Docker: health checks, /metrics, log reduction |
-| `test_load.py` | 2 | ⚠️ Live Docker: 3 concurrent pipelines, state isolation |
+| File | What it tests |
+|------|---------------|
+| `test_full_pipeline.py` | GREEN/YELLOW path, 400/409/413/429 errors, dedup, fix_memory recording |
+| `test_analysis_pipeline.py` | Log cleaner → error analyst chain, traffic light green/yellow/red, safety override |
+| `test_global_fallback.py` | Agent crash → RED notification, FAILED workflow state |
+| `test_quality_gates_integration.py` | Bandit + Pylint in pipeline context |
+| `test_webhook_to_clean.py` | Webhook event → log cleaner flow |
+| `test_smoke.py` | ⚠️ Live Docker: health checks, /metrics, log reduction |
+| `test_load.py` | ⚠️ Live Docker: concurrent pipelines, state isolation |
 
 ### Running Tests
 
@@ -1129,18 +1129,16 @@ auto-healing-devops-platform/
 ├── requirements.txt              # Python dependencies
 │
 ├── src/
-│   ├── shared/                   # 17 shared modules (all agents import from here)
+│   ├── shared/                   # Shared infrastructure (all agents import from here)
 │   │   ├── models.py             # Domain models + enums
-│   │   ├── config.py             # Agent configs, token budgets, SERVICE_URLS
+│   │   ├── config.py             # Agent configs, SERVICE_URLS, LLM_FIX_TIMEOUT
 │   │   ├── nim_client.py         # NVIDIA NIM LLM client (4-slot fallback)
 │   │   ├── model_fallback.py     # ModelFallbackManager
-│   │   ├── model_router.py       # Complexity-based model routing
 │   │   ├── task_complexity.py    # Deterministic complexity scorer
-│   │   ├── resilience.py         # Circuit breaker, retry+jitter, fallback
+│   │   ├── resilience.py         # Circuit breaker + global fallback notifier
 │   │   ├── quality_gates.py      # Bandit + Pylint code quality
 │   │   ├── secret_scanner.py     # Hardcoded secret detection
 │   │   ├── prompt_compressor.py  # Log compression for LLM prompts
-│   │   ├── diff_generator.py     # Unified diffs via difflib
 │   │   ├── fix_memory.py         # AI learning from past fix outcomes
 │   │   ├── adaptive_thresholds.py# Self-calibrating traffic light thresholds
 │   │   ├── heal_verifier.py      # Post-merge regression detection
@@ -1148,15 +1146,19 @@ auto-healing-devops-platform/
 │   │   ├── cost_tracker.py       # Per-build API cost estimation
 │   │   ├── token_tracker.py      # Thread-safe per-agent token counting
 │   │   ├── metrics.py            # Prometheus metrics definitions
-│   │   ├── logging_setup.py      # Structlog JSON configuration
 │   │   └── mcp_base.py           # Base aiohttp server class
 │   │
 │   ├── orchestrator_mcp/         # Port 8085 — Central controller
-│   │   ├── server.py             # Main pipeline, webhooks, stats, retry
+│   │   ├── server.py             # Thin shell — composes mixins + lifecycle
+│   │   ├── pipeline_mixin.py     # handle_build_failure + 4-step pipeline
+│   │   ├── pipeline_helpers.py   # Pure helpers (regex, ERROR_TYPE map)
+│   │   ├── github_mixin.py       # PR creation, auto-merge, GitHub webhook
+│   │   ├── slack_mixin.py        # Slack Approve / Reject buttons
+│   │   ├── workflow_api_mixin.py # REST CRUD for workflows
+│   │   ├── admin_mixin.py        # /api/stats, retry, AI code review
 │   │   ├── workflow.py           # State machine + pruning
 │   │   ├── deduplication.py      # 24h error fingerprint cache
 │   │   ├── rate_limiter.py       # Sliding-window rate limiter
-│   │   ├── scenario_router.py    # A/B scenario routing
 │   │   └── traffic_light.py      # Legacy traffic light copy
 │   │
 │   ├── log_cleaner_mcp/          # Port 8081 — Agent 3
@@ -1177,15 +1179,18 @@ auto-healing-devops-platform/
 │   │   └── dependency_tracker.py # Blast radius calculation
 │   │
 │   ├── llm_mcp/                  # Port 8086 — Agent 5
-│   │   ├── fix_generator.py      # Fix generation (memory+security+quality)
+│   │   ├── fix_generator.py      # FixGenerator retry loop
+│   │   ├── fix_validators.py     # Syntax + runtime gates
+│   │   ├── fix_prompts.py        # Retry prompt builder + bug list
+│   │   ├── fix_parsers.py        # Surgical patch + JSON parser
 │   │   ├── prompt_templates.py   # System + user prompts
-│   │   ├── quality_check.py      # Additional code quality checks
-│   │   └── summary_writer.py     # Human-readable fix summaries
+│   │   └── quality_check.py      # Additional code quality checks
 │   │
 │   ├── notification_mcp/         # Port 8087 — Agent 6
 │   │   ├── traffic_light_evaluator.py  # Adaptive traffic light
 │   │   ├── slack_notifier.py     # Block Kit templates + interactive buttons
 │   │   ├── slack_slash_handler.py# 9 slash commands
+│   │   ├── slash_responses.py    # Pure response builders
 │   │   └── teams_notifier.py     # Microsoft Teams adaptive cards
 │   │
 │   └── scheduler/                # Background tasks
@@ -1194,22 +1199,20 @@ auto-healing-devops-platform/
 │       └── daily_digest.py       # Morning Slack intelligence report
 │
 ├── tests/
-│   ├── unit/                     # 537 unit tests (no Docker, no network)
-│   │   ├── test_shared/          # 15 test files for all shared modules
+│   ├── unit/                     # Unit tests (no Docker, no network)
+│   │   ├── test_shared/          # Shared infrastructure modules
 │   │   ├── test_code_repairer/   # Agent 5 tests
 │   │   ├── test_error_analyst/   # Agent 4 tests
 │   │   ├── test_gerrit_mcp/      # PR creation tests
 │   │   ├── test_log_cleaner/     # All 5 filter tests + pipeline
-│   │   ├── test_orchestrator/    # Workflow, routing, webhooks
+│   │   ├── test_orchestrator/    # Workflow, webhooks, mixins
 │   │   ├── test_pipeline_monitor/# Agent 1 tests
 │   │   ├── test_review_notify/   # Agent 6 tests
 │   │   └── test_traffic_light/   # Traffic light edge cases
 │   │
-│   └── integration/              # 67 integration tests (9 files)
+│   └── integration/              # End-to-end pipeline tests
 │       ├── test_full_pipeline.py # GREEN, YELLOW, 400/409/413/429, dedup
 │       ├── test_analysis_pipeline.py  # Log cleaner + error analyst + TL chain
-│       ├── test_scenario_a.py    # Bug fix end-to-end
-│       ├── test_scenario_b.py    # Feature request end-to-end
 │       ├── test_global_fallback.py    # Agent crash → RED
 │       ├── test_quality_gates_integration.py
 │       ├── test_webhook_to_clean.py

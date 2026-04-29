@@ -117,12 +117,6 @@ class CostTracker:
         )
         return cost_usd
 
-    def get_build_cost(self, build_id: str) -> BuildCostRecord | None:
-        """Return the cost record for *build_id*, or None if not tracked."""
-        with self._lock:
-            rec = self._records.get(build_id)
-            return rec if (rec and rec.build_id) else None
-
     def session_summary(self) -> dict:
         """Return session-wide totals for /api/stats."""
         with self._lock:
@@ -139,22 +133,6 @@ class CostTracker:
                     self._session_total_usd / n_builds if n_builds else 0, 6
                 ),
             }
-
-    def all_builds(self) -> list[dict]:
-        """Return cost breakdown for every tracked build (sorted by cost desc)."""
-        with self._lock:
-            records = [
-                {
-                    "build_id":          r.build_id,
-                    "total_usd":         round(r.total_usd, 6),
-                    "calls":             r.calls,
-                    "prompt_tokens":     r.prompt_tokens,
-                    "completion_tokens": r.completion_tokens,
-                }
-                for r in self._records.values() if r.build_id
-            ]
-        return sorted(records, key=lambda x: x["total_usd"], reverse=True)
-
 
 # Global singleton
 cost_tracker = CostTracker()

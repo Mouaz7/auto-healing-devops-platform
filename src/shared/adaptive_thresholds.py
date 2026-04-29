@@ -36,7 +36,7 @@ import json
 import logging
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 from statistics import mean
 
@@ -99,7 +99,7 @@ class AdaptiveThresholds:
             approved:   True if human approved, False if rejected.
         """
         entry = {
-            "ts":         datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "ts":         datetime.now(UTC).isoformat(timespec="seconds"),
             "error_type": error_type,
             "confidence": round(confidence, 4),
             "approved":   approved,

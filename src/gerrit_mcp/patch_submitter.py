@@ -19,96 +19,25 @@ import asyncio
 import base64
 import logging
 import os
-import time
 
 import httpx
 
-logger = logging.getLogger(__name__)
-
-# Hallucinated / placeholder filenames that LLMs sometimes emit when they
-# can't identify a real file. We refuse to create PRs against these — the
-# filename would end up literally committed to the branch.
-_BAD_FILENAMES = {
-    "<unknown>", "(unknown)", "unknown", "unknown.py",
-    "<file>", "<filename>", "<path>", "placeholder.py",
-    "example.py", "auto_heal_fix.py", "file.py",
-}
-
-# Critical paths that auto-heal MUST NEVER modify.
-# Modifying these creates infrastructure failures: workflow loops, broken CI,
-# overwritten dependencies. AI fixes belong in application code only.
-_PROTECTED_PATH_PREFIXES = (
-    ".github/",          # CI workflow files — overwriting these breaks auto-heal itself
-    ".gitlab/",
-    ".circleci/",
-    ".azure/",
-    ".husky/",
-    "Dockerfile",
-    "docker-compose",
-    "Makefile",
-    "pyproject.toml",
-    "setup.py",
-    "setup.cfg",
-    "package.json",
-    "package-lock.json",
-    "requirements.txt",
-    "Pipfile",
-    "poetry.lock",
-    ".env",
-    ".gitignore",
-    "LICENSE",
+from src.gerrit_mcp.gerrit_helpers import (
+    GITHUB_API,
+    MAX_RETRIES,
+    RETRY_DELAYS,
+    rate_limit_wait,
+    sanitize_files,
 )
 
+logger = logging.getLogger(__name__)
 
-def _is_protected_path(path: str) -> bool:
-    """Return True for paths the AI must never modify (CI, deps, infra)."""
-    p = path.lstrip("./").lower()
-    return any(p.startswith(prefix.lower()) for prefix in _PROTECTED_PATH_PREFIXES)
-
-
-def _sanitize_files(files: list[str]) -> list[str]:
-    """Drop empty, hallucinated, protected, or non-Python paths."""
-    result: list[str] = []
-    for f in files or []:
-        if not f:
-            continue
-        f = f.strip()
-        if f.lower() in _BAD_FILENAMES:
-            continue
-        if f.startswith("<") or f.startswith("("):
-            continue
-        if any(c in f for c in "<>()[]{}"):
-            continue
-        if _is_protected_path(f):
-            logger.warning("rejecting protected path from AI fix: %s", f)
-            continue
-        if not f.endswith(".py"):
-            continue
-        result.append(f.lstrip("./"))
-    return result
-
-_GITHUB_API = "https://api.github.com"
-_MAX_RETRIES = 3
-_RETRY_DELAYS = [1.0, 2.0, 4.0]  # exponential backoff (seconds)
-_MAX_RATE_LIMIT_WAIT = 60.0       # never wait more than 60 s for rate-limit recovery
-
-
-def _rate_limit_wait(response: httpx.Response) -> float:
-    """Return how many seconds to wait after a 403/429 rate-limit response."""
-    retry_after = response.headers.get("Retry-After")
-    if retry_after:
-        try:
-            return min(float(retry_after), _MAX_RATE_LIMIT_WAIT)
-        except ValueError:
-            pass
-    reset_ts = response.headers.get("X-RateLimit-Reset")
-    if reset_ts:
-        try:
-            wait = float(reset_ts) - time.time()
-            return min(max(wait, 0.0), _MAX_RATE_LIMIT_WAIT)
-        except ValueError:
-            pass
-    return 5.0  # safe default when no header is present
+# Backwards-compat aliases for tests / legacy callers
+_GITHUB_API = GITHUB_API
+_MAX_RETRIES = MAX_RETRIES
+_RETRY_DELAYS = RETRY_DELAYS
+_sanitize_files = sanitize_files
+_rate_limit_wait = rate_limit_wait
 
 
 class PatchSubmitter:

@@ -1,12 +1,13 @@
 # Agent 5: Code Repairer — Port 8086
-# Implementeras i Sprint 3 — se .agents/workflows/sprint-3-intelligence.md
 #
-# Filer att skapa:
-#   prompt_templates.py — SYSTEM_PROMPT, SCENARIO_A/B templates, few-shot examples
-#   fix_generator.py    — FixGenerator (fallback chain, max 50 lines, 2 retries, 60s timeout)
-#   quality_check.py    — run Bandit+Pylint before fix is submitted
-#   summary_writer.py   — generate_summary()
+# Modules:
+#   prompt_templates.py — SYSTEM_PROMPT, SCENARIO_A_TEMPLATE, COMPLEX_REPAIR_TEMPLATE
+#   fix_generator.py    — FixGenerator (NIM fallback chain, dynamic retry budget)
+#   fix_validators.py   — syntax + runtime checks (AST, subprocess sandbox)
+#   fix_prompts.py      — retry-prompt builder, bug-list extractor
+#   fix_parsers.py      — surgical patch + JSON response parser
+#   quality_check.py    — Bandit + Pylint run before fix is submitted
 #   server.py           — LLMMCPServer
 #   tools.py            — MCP tool definitions
 #
-# State ut: { build_id, fix_patch, lint_ok, test_ok }
+# Output: { build_id, fix_patch, files_to_modify, confidence, lint_ok, test_ok }

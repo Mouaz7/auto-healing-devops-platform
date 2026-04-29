@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from src.shared.models import BuildEvent
 
@@ -52,7 +52,7 @@ class WebhookHandler:
             build_id=build_id,
             repo=payload.get("repo", ""),
             branch=payload.get("branch", ""),
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             job_name=payload.get("job_name", ""),
             status=status,
             log_url=payload.get("log_url", ""),

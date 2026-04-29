@@ -12,7 +12,7 @@ Production concerns addressed here:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from src.shared.models import WorkflowState, WorkflowStatus
 
@@ -106,7 +106,7 @@ class WorkflowEngine:
                 f"to {next_status.value}"
             )
         state.status = next_status
-        state.updated_at = datetime.now(timezone.utc)
+        state.updated_at = datetime.now(UTC)
         logger.info("workflow_advanced build_id=%s status=%s",
                     build_id, next_status.value)
         return state
@@ -124,17 +124,13 @@ class WorkflowEngine:
             )
         state.status = WorkflowStatus.FAILED
         state.error_message = reason
-        state.updated_at = datetime.now(timezone.utc)
+        state.updated_at = datetime.now(UTC)
         logger.warning("workflow_failed build_id=%s reason=%s", build_id, reason)
         return state
 
     def list_active(self) -> list[WorkflowState]:
         """Return all non-terminal workflows."""
         return [s for s in self._workflows.values() if s.status not in _TERMINAL_STATES]
-
-    def all_build_ids(self) -> list[str]:
-        """Return all registered build IDs."""
-        return list(self._workflows.keys())
 
     def stats(self) -> dict[str, int]:
         """Return a count of workflows grouped by status."""
@@ -150,7 +146,7 @@ class WorkflowEngine:
         Returns:
             {"pruned": N, "timed_out": M} with counts of affected workflows.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         prune_cutoff = now - timedelta(hours=PRUNE_AFTER_HOURS)
         review_cutoff = now - timedelta(hours=REVIEW_TIMEOUT_HOURS)
 

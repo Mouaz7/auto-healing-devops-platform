@@ -1,12 +1,15 @@
 # Orchestrator MCP — Port 8085 — Central workflow coordinator
-# Sprint 2: skeleton (Agent 1+3 chain)
-# Sprint 3: full pipeline (Agent 1->3->4->5->6)
-# Sprint 4: scenarios A/B + global fallback
-# Se .agents/workflows/sprint-2-core-services.md
 #
-# Filer att skapa:
-#   workflow.py        — WorkflowEngine (state machine, VALID_TRANSITIONS)
-#   traffic_light.py   — placeholder Sprint 2, full in Sprint 3
-#   scenario_router.py — ScenarioRouter (Scenario A/B/YELLOW)
-#   server.py          — OrchestratorMCPServer
-#   tools.py           — MCP tool definitions
+# Modules:
+#   server.py             — OrchestratorMCPServer (thin shell + lifecycle)
+#   pipeline_mixin.py     — handle_build_failure + Agent 3→4→5→6 pipeline
+#   pipeline_helpers.py   — pure helpers (FAILED_FILE regex, ERROR_TYPE map)
+#   github_mixin.py       — PR creation, auto-merge, GitHub webhook
+#   slack_mixin.py        — Slack interactive Approve / Reject
+#   workflow_api_mixin.py — REST CRUD for workflows
+#   admin_mixin.py        — stats, retry, AI code review
+#   workflow.py           — WorkflowEngine (state machine, transitions)
+#   deduplication.py      — repeat-error guard
+#   rate_limiter.py       — per-IP throttle
+#   traffic_light.py      — GREEN / YELLOW / RED verdict
+#   tools.py              — MCP tool definitions

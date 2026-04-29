@@ -22,7 +22,7 @@ import json
 import logging
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +65,7 @@ class AuditLog:
             **kwargs: Arbitrary key-value pairs to include in the record.
         """
         record: dict[str, Any] = {
-            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "ts": datetime.now(UTC).isoformat(timespec="seconds"),
             "event": event,
         }
         record.update(kwargs)
@@ -76,9 +76,8 @@ class AuditLog:
             return
 
         try:
-            with self._lock:
-                with open(self._path, "a", encoding="utf-8") as fh:
-                    fh.write(line)
+            with self._lock, open(self._path, "a", encoding="utf-8") as fh:
+                fh.write(line)
         except OSError as exc:
             # Never crash the pipeline due to audit failure
             logger.warning("audit_write_failed event=%s error=%s", event, exc)
