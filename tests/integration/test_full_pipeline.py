@@ -212,8 +212,10 @@ async def test_missing_raw_log_returns_400(orch_client):
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_duplicate_build_id_returns_409(orch_client):
-    """Same build_id submitted twice → 409 on the second call."""
+async def test_duplicate_build_id_returns_already_triggered(orch_client):
+    """Same build_id submitted twice → 200 + ALREADY_TRIGGERED on the second call.
+    Workflow re-runs in CI repeatedly hit the same run_id; treating duplicates
+    as 'already in progress' rather than 409 errors keeps CI logs clean."""
     _setup_green(respx.mock)
     payload = {"build_id": "e2e-dup", "raw_log": "AssertionError", "repo": "r/r", "sync": True}
 
@@ -221,7 +223,9 @@ async def test_duplicate_build_id_returns_409(orch_client):
     assert r1.status == 200
 
     r2 = await orch_client.post("/tools/handle_build_failure", json=payload)
-    assert r2.status == 409
+    assert r2.status == 200
+    body2 = await r2.json()
+    assert body2["status"] == "ALREADY_TRIGGERED"
 
 
 @pytest.mark.asyncio

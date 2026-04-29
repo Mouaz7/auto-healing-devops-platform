@@ -156,7 +156,28 @@ class OrchestratorMCPServer(MCPServiceBase):
         try:
             self.engine.register(state)
         except ValueError as exc:
-            return web.json_response({"error": str(exc)}, status=409)
+            # Already registered — a duplicate POST from a workflow re-run
+            # or retry is not an error from the caller's perspective. The
+            # auto-heal is already in progress and another PR will not be
+            # opened. Return 200 + ALREADY_TRIGGERED so the workflow step
+            # exits cleanly without flooding the logs with 409s.
+            try:
+                existing_status = self.engine.get(build_id).status.value
+            except Exception:  # pylint: disable=broad-exception-caught
+                existing_status = "UNKNOWN"
+            logger.info(
+                "duplicate_handle_build_failure build_id=%s existing_status=%s",
+                build_id, existing_status,
+            )
+            return web.json_response(
+                {
+                    "build_id": build_id,
+                    "status": "ALREADY_TRIGGERED",
+                    "existing_status": existing_status,
+                    "message": str(exc),
+                },
+                status=200,
+            )
 
         # Generate a correlation ID so this pipeline run can be traced in logs
         # across all 6 agent services
