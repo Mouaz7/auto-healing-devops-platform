@@ -269,9 +269,34 @@ class OrchestratorMCPServer(MCPServiceBase):
                 f = m.group(1).strip().lstrip("./")
                 if f and f not in fallback_files:
                     fallback_files.append(f)
-            err_type = "LOGIC_ERROR"
-            if re.search(r"ERROR_TYPE:\s*(\w+)", raw_log or ""):
-                err_type = re.search(r"ERROR_TYPE:\s*(\w+)", raw_log).group(1)
+
+            # Map raw ERROR_TYPE strings (which can be free-form, e.g.
+            # 'STATIC_ANALYSIS_LOGIC_BUG' or 'WRONG_SORT_OUTPUT') to the
+            # ErrorType enum values that LLM-mcp accepts. Anything we
+            # cannot map cleanly falls back to VALUE_ERROR — the closest
+            # generic 'wrong logic' bucket — rather than UNKNOWN, which
+            # gives the LLM less context.
+            _ERROR_TYPE_MAP = {
+                "SYNTAX": "SYNTAX_ERROR", "INDENT": "SYNTAX_ERROR",
+                "IMPORT": "IMPORT_ERROR",
+                "TYPE": "TYPE_ERROR",
+                "ASSERTION": "ASSERTION_ERROR",
+                "FILE_NOT_FOUND": "FILE_NOT_FOUND",
+                "ATTRIBUTE": "ATTRIBUTE_ERROR",
+                "NAME": "NAME_ERROR",
+                "KEY": "KEY_ERROR",
+                "INDEX": "INDEX_ERROR",
+                "ZERO_DIVISION": "ZERO_DIVISION_ERROR", "DIVISION": "ZERO_DIVISION_ERROR",
+            }
+            err_type = "VALUE_ERROR"
+            m = re.search(r"ERROR_TYPE:\s*(\w+)", raw_log or "")
+            if m:
+                raw = m.group(1).upper()
+                for prefix, mapped in _ERROR_TYPE_MAP.items():
+                    if raw.startswith(prefix) or prefix in raw:
+                        err_type = mapped
+                        break
+
             analysis = {
                 "error_type": err_type,
                 "blast_radius": "LOW" if len(fallback_files) <= 1 else "MEDIUM",
