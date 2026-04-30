@@ -71,6 +71,13 @@ class GerritMCPServer(MCPServiceBase):
                 {"error": "build_id and repo are required"}, status=400
             )
 
+        report_data = {
+            k: data[k] for k in (
+                "colour", "confidence", "elapsed_s",
+                "error_type", "blast_radius", "root_cause", "explanation",
+            ) if k in data
+        } or None
+
         try:
             result = await self._submitter.create_pr(
                 repo=repo,
@@ -79,6 +86,7 @@ class GerritMCPServer(MCPServiceBase):
                 affected_files=data.get("affected_files", []),
                 title=data.get("title", ""),
                 base_branch=data.get("base_branch", "main"),
+                report_data=report_data,
             )
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.error("submit_patch_failed build_id=%s error=%s", build_id, exc)

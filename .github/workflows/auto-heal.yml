@@ -9,8 +9,6 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Skip auto-heal commits to prevent infinite loops
-    if: "!startsWith(github.event.head_commit.message, 'auto-heal')"
 
     steps:
       - uses: actions/checkout@v3
@@ -32,7 +30,7 @@ jobs:
         continue-on-error: true
 
       - name: Trigger on test failure
-        if: steps.run_tests.outcome == 'failure'
+        if: steps.run_tests.outcome == 'failure' && !startsWith(github.event.head_commit.message, 'auto-heal')
         run: |
           LOG=$(cat /tmp/pytest.log | head -c 400000)
           curl -s -X POST https://washhouse-shopper-retry.ngrok-free.dev/tools/handle_build_failure \
@@ -49,6 +47,7 @@ jobs:
       - name: Static logic analysis (AST)
         if: steps.run_tests.outcome == 'success'
         id: static_analysis
+        continue-on-error: true
         run: |
           CHANGED=$(git diff --name-only HEAD~1 HEAD -- '*.py' 2>/dev/null || \
                     git diff --name-only HEAD -- '*.py' 2>/dev/null || echo "")
@@ -143,6 +142,45 @@ jobs:
             echo "bug_found=false" >> $GITHUB_OUTPUT
           fi
           exit $STATUS
+
+      - name: Trigger auto-heal from static analysis
+        if: steps.run_tests.outcome == 'success' && steps.static_analysis.outputs.bug_found == 'true' && !startsWith(github.event.head_commit.message, 'auto-heal')
+        run: |
+          CHANGED=$(git diff --name-only HEAD~1 HEAD -- '*.py' 2>/dev/null || \
+                    git diff --name-only HEAD -- '*.py' 2>/dev/null || echo "")
+          LOG="Static analysis found logic bug(s) in: $CHANGED"
+          for FILE in $CHANGED; do
+            [ -f "$FILE" ] && LOG="$LOG\nFAILED_FILE: $FILE"
+          done
+          PAYLOAD=$(printf '%s' "$LOG" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+          echo "Sending $(echo "$LOG" | wc -c) bytes to auto-healing pipeline…"
+          RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
+            --max-time 15 \
+            -X POST https://washhouse-shopper-retry.ngrok-free.dev/tools/handle_build_failure \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"build_id\": \"${{ github.run_id }}-static\",
+              \"repo\": \"${{ github.repository }}\",
+              \"raw_log\": $PAYLOAD
+            }" 2>/dev/null || echo "curl_failed\nHTTP_STATUS:000")
+          HTTP_STATUS=$(echo "$RESP" | grep "HTTP_STATUS:" | cut -d: -f2)
+          BODY=$(echo "$RESP" | grep -v "HTTP_STATUS:")
+          if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "202" ]; then
+            echo "Notice: Auto-heal triggered successfully — pipeline running in background"
+            echo "$BODY"
+          else
+            echo "Warning: Auto-heal server returned HTTP $HTTP_STATUS (server may be offline)"
+            echo "$BODY"
+          fi
+          # Always exit 0 — the CI is already marked failed by static_analysis above.
+          # This step's job is only to fire-and-forget the auto-heal trigger.
+          exit 0
+
+      - name: Fail CI — static bugs found
+        if: steps.run_tests.outcome == 'success' && steps.static_analysis.outputs.bug_found == 'true' && !startsWith(github.event.head_commit.message, 'auto-heal')
+        run: |
+          echo "Static analysis detected logic bug(s). Auto-heal pipeline triggered above."
+          exit 1
 
       - name: AI Logic Review on changed files
         if: steps.run_tests.outcome == 'success' && steps.static_analysis.outputs.bug_found == 'false'

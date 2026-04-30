@@ -64,6 +64,7 @@ class NotificationMCPServer(MCPServiceBase):
             affected_files=data.get("affected_files", []),
         )
 
+        elapsed_s = int(data.get("elapsed_s", 0))
         result = evaluate_traffic_light(code_fix, analysis)
         files_str = ", ".join(analysis.affected_files) if analysis.affected_files else "(none reported)"
         logger.info(
@@ -80,6 +81,7 @@ class NotificationMCPServer(MCPServiceBase):
             send_slack_notification(
                 result.colour.value, build_id, result.final_score,
                 result.reason, files_str, code_fix.explanation,
+                elapsed_s=elapsed_s,
             ),
         )
 

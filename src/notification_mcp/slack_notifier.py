@@ -21,7 +21,7 @@ _SLACK_TEMPLATES: dict[str, dict] = {
             {"type": "section",
              "text": {"type": "mrkdwn",
                       "text": "*Build:* __BUILD_ID__\n*Confidence:* __SCORE_PCT__%\n"
-                              "*Files:* __FILES__\n__EXPLANATION__"}},
+                              "*Files:* __FILES__\n*Duration:* __DURATION__\n__EXPLANATION__"}},
         ],
     },
     "YELLOW": {
@@ -31,7 +31,8 @@ _SLACK_TEMPLATES: dict[str, dict] = {
             {"type": "section",
              "text": {"type": "mrkdwn",
                       "text": "*Build:* __BUILD_ID__\n*Confidence:* __SCORE_PCT__%\n"
-                              "*Files:* __FILES__\n*Reason:* __REASON__\n__EXPLANATION__"}},
+                              "*Files:* __FILES__\n*Duration:* __DURATION__\n"
+                              "*Reason:* __REASON__\n__EXPLANATION__"}},
         ],
     },
     "RED": {
@@ -40,15 +41,25 @@ _SLACK_TEMPLATES: dict[str, dict] = {
              "text": {"type": "plain_text", "text": "🔴 Fix Blocked"}},
             {"type": "section",
              "text": {"type": "mrkdwn",
-                      "text": "*Build:* __BUILD_ID__\n*Files:* __FILES__\n*Reason:* __REASON__\n"
+                      "text": "*Build:* __BUILD_ID__\n*Files:* __FILES__\n"
+                              "*Duration:* __DURATION__\n*Reason:* __REASON__\n"
                               "Manual intervention required."}},
         ],
     },
 }
 
 
+def _format_duration(elapsed_s: int) -> str:
+    if elapsed_s <= 0:
+        return "—"
+    if elapsed_s < 60:
+        return f"{elapsed_s}s"
+    return f"{elapsed_s // 60}m {elapsed_s % 60}s"
+
+
 def render_payload(colour: str, build_id: str, score: float,
-                   reason: str, files: str = "", explanation: str = "") -> str:
+                   reason: str, files: str = "", explanation: str = "",
+                   elapsed_s: int = 0) -> str:
     """Render a Slack Block Kit payload as a JSON string."""
     template = copy.deepcopy(_SLACK_TEMPLATES.get(colour, _SLACK_TEMPLATES["RED"]))
     raw = json.dumps(template)
@@ -56,6 +67,7 @@ def render_payload(colour: str, build_id: str, score: float,
     raw = raw.replace("__SCORE_PCT__",   str(round(score * 100)))
     raw = raw.replace("__REASON__",      reason)
     raw = raw.replace("__FILES__",       files)
+    raw = raw.replace("__DURATION__",    _format_duration(elapsed_s))
     raw = raw.replace("__EXPLANATION__", explanation)
     return raw
 
@@ -126,13 +138,14 @@ async def send_slack_review_buttons(
 
 async def send_slack_notification(
     colour: str, build_id: str, score: float, reason: str,
-    files: str = "", explanation: str = "",
+    files: str = "", explanation: str = "", elapsed_s: int = 0,
 ) -> bool:
     """POST a Block Kit message to the Slack webhook. Returns True on success."""
     if not _SLACK_WEBHOOK_URL:
         logger.debug("slack_notify skipped — SLACK_WEBHOOK_URL not set")
         return False
-    payload = render_payload(colour, build_id, score, reason, files, explanation)
+    payload = render_payload(colour, build_id, score, reason, files, explanation,
+                             elapsed_s=elapsed_s)
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
             _SLACK_WEBHOOK_URL, content=payload,

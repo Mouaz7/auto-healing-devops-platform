@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import traceback
 import uuid
 
@@ -192,6 +193,8 @@ class PipelineMixin:
         """Execute Agent 3→4→5→6 and return the final verdict dict."""
         headers = {"X-Request-ID": correlation_id} if correlation_id else {}
 
+        started_at = time.monotonic()
+
         cleaned  = await self._step_clean_logs(client, build_id, raw_log, headers)
         analysis = await self._step_analyse(client, build_id, raw_log, cleaned, headers)
         self._check_regression(build_id, analysis)
@@ -202,7 +205,10 @@ class PipelineMixin:
         if fix is None:  # 422 — structurally unrecoverable
             return self._blocked_result(build_id, "fix_rejected", "Fix generation rejected")
 
-        verdict = await self._step_notify(client, build_id, fix, analysis, headers)
+        elapsed_s = round(time.monotonic() - started_at)
+        verdict = await self._step_notify(
+            client, build_id, fix, analysis, headers, elapsed_s=elapsed_s,
+        )
 
         dedup_hit = dedup_cache.check(
             error_type=analysis["error_type"],
@@ -213,7 +219,7 @@ class PipelineMixin:
             return self._dedup_result(build_id, dedup_hit)
 
         return await self._finalise(
-            client, build_id, repo, analysis, fix, verdict,
+            client, build_id, repo, analysis, fix, verdict, elapsed_s=elapsed_s,
         )
 
     # --- Pipeline steps -----------------------------------------------
@@ -352,7 +358,7 @@ class PipelineMixin:
         return fix
 
     async def _step_notify(
-        self, client, build_id, fix, analysis, headers,
+        self, client, build_id, fix, analysis, headers, elapsed_s: int = 0,
     ) -> dict:
         """Agent 6 — traffic-light verdict + notification."""
         self.engine.advance(build_id, WorkflowStatus.VALIDATING)
@@ -366,6 +372,7 @@ class PipelineMixin:
                 "error_type":     analysis["error_type"],
                 "blast_radius":   analysis["blast_radius"],
                 "affected_files": analysis["affected_files"],
+                "elapsed_s":      elapsed_s,
             },
             headers=headers,
         )
@@ -402,18 +409,28 @@ class PipelineMixin:
         }
 
     async def _finalise(
-        self, client, build_id, repo, analysis, fix, verdict,
+        self, client, build_id, repo, analysis, fix, verdict, elapsed_s: int = 0,
     ) -> dict:
         """Apply traffic-light decision: PR + merge / PR + Slack / BLOCKED."""
         colour = verdict.get("status", "RED")
         pr_url = ""
         files_for_pr = analysis["affected_files"] or fix.get("files_to_modify", [])
 
+        report_data = {
+            "colour":      colour,
+            "confidence":  fix.get("confidence", 0.0),
+            "elapsed_s":   elapsed_s,
+            "error_type":  str(analysis.get("error_type", "")),
+            "blast_radius": str(analysis.get("blast_radius", "")),
+            "root_cause":  analysis.get("root_cause", ""),
+            "explanation": fix.get("explanation", ""),
+        }
+
         if colour == "GREEN" and verdict.get("auto_merge_allowed"):
             if repo:
                 pr_url = await self._create_github_pr(
                     client, build_id, repo, fix["fix_patch"],
-                    files_for_pr, auto_merge=True,
+                    files_for_pr, auto_merge=True, report_data=report_data,
                 )
             self.engine.advance(build_id, WorkflowStatus.APPLYING_FIX)
             self.engine.advance(build_id, WorkflowStatus.COMPLETED)
@@ -423,7 +440,7 @@ class PipelineMixin:
             if repo:
                 pr_data = await self._create_github_pr_with_number(
                     client, build_id, repo, fix["fix_patch"],
-                    files_for_pr, auto_merge=False,
+                    files_for_pr, auto_merge=False, report_data=report_data,
                 )
                 pr_url = pr_data.get("pr_url", "")
                 await send_slack_review_buttons(

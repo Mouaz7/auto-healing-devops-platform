@@ -44,17 +44,21 @@ async def _submit_patch(
     patch: str,
     affected_files: list,
     auto_merge: bool,
+    report_data: dict | None = None,
 ) -> dict:
     """Single source of truth for calling gerrit-mcp /tools/submit_patch."""
+    payload: dict = {
+        "build_id":       build_id,
+        "repo":           repo,
+        "patch":          patch,
+        "affected_files": affected_files,
+        "title":          _pr_title(build_id, auto_merge),
+    }
+    if report_data:
+        payload.update(report_data)
     resp = await client.post(
         f"{_config.SERVICE_URLS['gerrit']}/tools/submit_patch",
-        json={
-            "build_id":       build_id,
-            "repo":           repo,
-            "patch":          patch,
-            "affected_files": affected_files,
-            "title":          _pr_title(build_id, auto_merge),
-        },
+        json=payload,
     )
     resp.raise_for_status()
     return resp.json()
@@ -71,11 +75,13 @@ class GitHubMixin:
         patch: str,
         affected_files: list,
         auto_merge: bool = False,
+        report_data: dict | None = None,
     ) -> str:
         """Open a PR via gerrit-mcp; auto-merge if GREEN. Returns the PR URL."""
         try:
             pr_data = await _submit_patch(
                 client, build_id, repo, patch, affected_files, auto_merge,
+                report_data=report_data,
             )
             pr_url = str(pr_data.get("pr_url", ""))
             pr_number = pr_data.get("pr_number", 0)
@@ -98,11 +104,13 @@ class GitHubMixin:
         patch: str,
         affected_files: list,
         auto_merge: bool = False,
+        report_data: dict | None = None,
     ) -> dict:
         """Like _create_github_pr but returns full {pr_url, pr_number, branch}."""
         try:
             return await _submit_patch(
                 client, build_id, repo, patch, affected_files, auto_merge,
+                report_data=report_data,
             )
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning("github_pr_failed build_id=%s error=%s", build_id, exc)
