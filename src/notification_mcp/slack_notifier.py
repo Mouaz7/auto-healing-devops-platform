@@ -143,7 +143,9 @@ async def send_slack_notification(
         return ok
 
 
-async def send_slack_pipeline_started(build_id: str, repo: str = "") -> bool:
+async def send_slack_pipeline_started(
+    build_id: str, repo: str = "", files: list[str] | None = None
+) -> bool:
     """Send an immediate "started" Slack notice so the user sees that auto-heal
     is working. The final GREEN/YELLOW/RED message follows when the pipeline
     completes (can take 5-20 min for hard cases — without this, the user has
@@ -151,14 +153,15 @@ async def send_slack_pipeline_started(build_id: str, repo: str = "") -> bool:
     """
     if not _SLACK_WEBHOOK_URL:
         return False
-    repo_line = f"*Repo:* `{repo}`\n" if repo else ""
+    repo_line  = f"*Repo:* `{repo}`\n" if repo else ""
+    files_line = ("*Files:* " + ", ".join(f"`{f}`" for f in files) + "\n") if files else ""
     payload = json.dumps({
         "blocks": [
             {"type": "header",
              "text": {"type": "plain_text", "text": "⚙️ Auto-heal Started"}},
             {"type": "section",
              "text": {"type": "mrkdwn",
-                      "text": (f"*Build:* `{build_id}`\n{repo_line}"
+                      "text": (f"*Build:* `{build_id}`\n{repo_line}{files_line}"
                                "Pipeline running — analysing logs and "
                                "generating fix. Result follows in a few minutes.")}},
         ],

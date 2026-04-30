@@ -109,7 +109,9 @@ class PipelineMixin:
         # Fire-and-forget Slack ping so the user sees activity immediately.
         # The pipeline can take 5-20 min for hard cases; without this, the
         # next thing they'd see is the final GREEN/YELLOW/RED much later.
-        asyncio.create_task(send_slack_pipeline_started(build_id, repo))
+        asyncio.create_task(
+            send_slack_pipeline_started(build_id, repo, extract_failed_files(raw_log))
+        )
         asyncio.create_task(
             self._run_pipeline_background(build_id, raw_log, repo, correlation_id)
         )
