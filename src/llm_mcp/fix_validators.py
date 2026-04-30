@@ -182,6 +182,18 @@ def validate_fix_runtime(fix_code: str, timeout_s: int = 5) -> tuple[bool, str]:
                 # Keep the deepest frame (final "File ... line N, in <fn>" + Exception)
                 # rather than truncating mid-word at the entry point.
                 err = "...[traceback truncated]...\n" + err[-5000:]
+            # NoneType in a TypeError almost always means an arg was missing at the
+            # call site, not a bug in the comparison itself. The traceback points at
+            # the failing line which sends the LLM tunnel-visioning there. Redirect.
+            if "NoneType" in err and "TypeError" in err:
+                err += (
+                    "\n\n*** ROOT-CAUSE HINT ***\n"
+                    "A NoneType operand means an argument was MISSING at the CALL "
+                    "SITE, not a bug in the failing line itself. Look at every "
+                    "call to this function in the file (e.g. `quicksort(my_array)` "
+                    "instead of `quicksort(my_array, 0, len(my_array)-1)`). "
+                    "Fix the CALL, not the default-argument check."
+                )
             return False, f"RuntimeError: {err}"
 
         out = result.stdout or ""

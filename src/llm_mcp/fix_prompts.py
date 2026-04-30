@@ -3,6 +3,25 @@ from __future__ import annotations
 
 import re
 
+_ERROR_FP_RE = re.compile(
+    r"\b([A-Z][a-zA-Z]+(?:Error|Exception))\b[:.\s]*([^\n]{0,80})"
+)
+_TMP_PATH_RE = re.compile(r"/tmp/\S+\.py|line \d+")
+
+
+def _error_fingerprint(err: str) -> str:
+    """Return a normalised fingerprint for an error string.
+
+    Strips tmp paths and line numbers so that two TypeErrors with the same
+    root cause but different temp filenames compare as equal — the previous
+    raw-string comparison missed this and the STRATEGY PIVOT never fired.
+    """
+    m = _ERROR_FP_RE.search(err)
+    if m:
+        suffix = _TMP_PATH_RE.sub("", m.group(2)).strip()
+        return f"{m.group(1)}::{suffix[:60]}"
+    return err[:80]
+
 
 def build_retry_prompt(original_prompt: str, failed_attempts: list[dict]) -> str:
     """Construct a retry prompt that shows ALL prior failures.
@@ -11,25 +30,33 @@ def build_retry_prompt(original_prompt: str, failed_attempts: list[dict]) -> str
     message to grow unbounded across retries and let the LLM lose track of
     the original task.
 
-    If the last 2 attempts produced the SAME error message, the LLM is stuck
-    in a loop. We then prepend a STRATEGY PIVOT directive forcing it to throw
-    away its previous approach.
+    If the last 2 attempts hit the same error TYPE (after normalising tmp
+    paths and line numbers), the LLM is stuck. We then prepend a STRATEGY
+    PIVOT directive forcing it to look at call sites instead of the failing
+    line.
     """
     stuck = False
     if len(failed_attempts) >= 2:
-        last = failed_attempts[-1]["err"][:120]
-        prev = failed_attempts[-2]["err"][:120]
-        stuck = last == prev
+        last_fp = _error_fingerprint(failed_attempts[-1]["err"])
+        prev_fp = _error_fingerprint(failed_attempts[-2]["err"])
+        stuck = last_fp == prev_fp
 
     parts = [original_prompt, "", "=" * 60, "PRIOR FAILED ATTEMPTS", "=" * 60]
     if stuck:
         parts.extend([
             "",
             "*** STRATEGY PIVOT REQUIRED ***",
-            "Your last two attempts produced the SAME error. You are in a loop.",
-            "Throw away your previous approach completely. Re-read the original",
-            "code from scratch. Identify ALL bugs first (full Scan Phase). Write",
-            "the entire file from a blank slate — do not edit your previous fix.",
+            "Your last two attempts hit the SAME error type. You are in a loop.",
+            "",
+            "STOP editing the failing line. The bug is somewhere ELSE — most",
+            "commonly at a CALL SITE that passes wrong arguments, or a missing",
+            "return statement that makes a downstream value None.",
+            "",
+            "Step 1: list every call site of the failing function in the file.",
+            "Step 2: list every function whose return value flows into the",
+            "        failing operand.",
+            "Step 3: write the fix. It will almost certainly be on a different",
+            "        line than where the traceback points.",
             "",
         ])
     for fa in failed_attempts:
