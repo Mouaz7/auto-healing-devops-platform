@@ -43,22 +43,42 @@ def build_retry_prompt(original_prompt: str, failed_attempts: list[dict]) -> str
 
     parts = [original_prompt, "", "=" * 60, "PRIOR FAILED ATTEMPTS", "=" * 60]
     if stuck:
-        parts.extend([
-            "",
-            "*** STRATEGY PIVOT REQUIRED ***",
-            "Your last two attempts hit the SAME error type. You are in a loop.",
-            "",
-            "STOP editing the failing line. The bug is somewhere ELSE — most",
-            "commonly at a CALL SITE that passes wrong arguments, or a missing",
-            "return statement that makes a downstream value None.",
-            "",
-            "Step 1: list every call site of the failing function in the file.",
-            "Step 2: list every function whose return value flows into the",
-            "        failing operand.",
-            "Step 3: write the fix. It will almost certainly be on a different",
-            "        line than where the traceback points.",
-            "",
-        ])
+        last_err  = failed_attempts[-1]["err"]
+        last_kind = failed_attempts[-1].get("kind", "")
+        if "SyntaxError" in last_err or last_kind == "syntax":
+            # Surgical changed_lines patches keep producing broken indentation —
+            # force the LLM to abandon the line-by-line approach.
+            parts.extend([
+                "",
+                "*** STRATEGY PIVOT — STRUCTURE BROKEN ***",
+                "Your surgical patches keep producing SyntaxErrors. Editing",
+                "individual lines is mangling indentation context.",
+                "",
+                "STOP using `changed_lines`. Return the ENTIRE corrected file",
+                "in `fix_code` — every line, top to bottom, with consistent",
+                "4-space indentation. Re-read the original code from line 1,",
+                "write it out from scratch with all bugs fixed in one pass.",
+                "",
+            ])
+        else:
+            # Runtime errors that repeat are usually call-site bugs the LLM
+            # missed because the traceback points at the symptom, not the cause.
+            parts.extend([
+                "",
+                "*** STRATEGY PIVOT REQUIRED ***",
+                "Your last two attempts hit the SAME error type. You are in a loop.",
+                "",
+                "STOP editing the failing line. The bug is somewhere ELSE — most",
+                "commonly at a CALL SITE that passes wrong arguments, or a missing",
+                "return statement that makes a downstream value None.",
+                "",
+                "Step 1: list every call site of the failing function in the file.",
+                "Step 2: list every function whose return value flows into the",
+                "        failing operand.",
+                "Step 3: write the fix. It will almost certainly be on a different",
+                "        line than where the traceback points.",
+                "",
+            ])
     for fa in failed_attempts:
         parts.append("")
         parts.append(f"--- Attempt {fa['attempt']} ({fa['kind']}) FAILED ---")

@@ -108,3 +108,30 @@ class TestBuildRetryPromptPivot:
                      "err": "TypeError: bad"}]
         prompt = build_retry_prompt("orig", attempts)
         assert "STRATEGY PIVOT REQUIRED" not in prompt
+
+    def test_two_syntax_errors_trigger_structure_pivot(self) -> None:
+        """Repeated SyntaxErrors should ask for full rewrite, not call sites."""
+        attempts = [
+            {"attempt": 0, "kind": "syntax", "fix_preview": "x",
+             "err": "SyntaxError on line 11: unexpected indent"},
+            {"attempt": 1, "kind": "syntax", "fix_preview": "x",
+             "err": "SyntaxError on line 11: unexpected indent"},
+        ]
+        prompt = build_retry_prompt("orig", attempts)
+        assert "STRUCTURE BROKEN" in prompt
+        assert "ENTIRE corrected file" in prompt
+        # The call-site language MUST NOT appear in this branch — wrong advice
+        assert "call site" not in prompt.lower()
+
+    def test_two_runtime_errors_still_get_call_site_pivot(self) -> None:
+        """Make sure the runtime branch is unaffected by the new syntax branch."""
+        attempts = [
+            {"attempt": 0, "kind": "runtime", "fix_preview": "x",
+             "err": "TypeError: '<' not supported between 'int' and 'NoneType'"},
+            {"attempt": 1, "kind": "runtime", "fix_preview": "x",
+             "err": "TypeError: '<' not supported between 'int' and 'NoneType'"},
+        ]
+        prompt = build_retry_prompt("orig", attempts)
+        assert "STRATEGY PIVOT REQUIRED" in prompt
+        assert "CALL SITE" in prompt
+        assert "STRUCTURE BROKEN" not in prompt

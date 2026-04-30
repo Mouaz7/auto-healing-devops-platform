@@ -299,6 +299,19 @@ class FixGenerator:
                             "err": syntax_err[:1600],
                             "fix_preview": fix_code[:1000],
                         })
+                        # Two syntax errors in a row → surgical patches are
+                        # mangling structure. Switch to complex_mode so the LLM
+                        # rewrites the whole file instead of editing lines.
+                        syntax_fail_count = sum(
+                            1 for a in failed_attempts if a["kind"] == "syntax"
+                        )
+                        if syntax_fail_count >= 2 and not complex_mode:
+                            complex_mode = True
+                            logger.info(
+                                "complex_mode_escalated build_id=%s "
+                                "reason=repeated_syntax_errors",
+                                analysis.build_id,
+                            )
                         messages[-1]["content"] = build_retry_prompt(
                             original_user_prompt, failed_attempts,
                         )
