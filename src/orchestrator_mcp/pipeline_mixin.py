@@ -20,7 +20,10 @@ from src.shared.fix_memory import fix_memory
 from src.shared.heal_verifier import heal_verifier
 from src.shared.models import WorkflowState, WorkflowStatus
 from src.shared.resilience import handle_agent_failure, trigger_global_fallback
-from src.notification_mcp.slack_notifier import send_slack_review_buttons
+from src.notification_mcp.slack_notifier import (
+    send_slack_pipeline_started,
+    send_slack_review_buttons,
+)
 from src.orchestrator_mcp.deduplication import dedup_cache
 from src.orchestrator_mcp.pipeline_helpers import (
     build_minimal_analysis,
@@ -103,6 +106,10 @@ class PipelineMixin:
         if data.get("sync") is True:
             return await self._run_pipeline_sync(build_id, raw_log, repo, correlation_id)
 
+        # Fire-and-forget Slack ping so the user sees activity immediately.
+        # The pipeline can take 5-20 min for hard cases; without this, the
+        # next thing they'd see is the final GREEN/YELLOW/RED much later.
+        asyncio.create_task(send_slack_pipeline_started(build_id, repo))
         asyncio.create_task(
             self._run_pipeline_background(build_id, raw_log, repo, correlation_id)
         )

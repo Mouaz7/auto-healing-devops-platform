@@ -141,3 +141,38 @@ async def send_slack_notification(
         ok = resp.status_code == 200
         logger.info("slack_notify build_id=%s colour=%s ok=%s", build_id, colour, ok)
         return ok
+
+
+async def send_slack_pipeline_started(build_id: str, repo: str = "") -> bool:
+    """Send an immediate "started" Slack notice so the user sees that auto-heal
+    is working. The final GREEN/YELLOW/RED message follows when the pipeline
+    completes (can take 5-20 min for hard cases — without this, the user has
+    no visibility during the wait).
+    """
+    if not _SLACK_WEBHOOK_URL:
+        return False
+    repo_line = f"*Repo:* `{repo}`\n" if repo else ""
+    payload = json.dumps({
+        "blocks": [
+            {"type": "header",
+             "text": {"type": "plain_text", "text": "⚙️ Auto-heal Started"}},
+            {"type": "section",
+             "text": {"type": "mrkdwn",
+                      "text": (f"*Build:* `{build_id}`\n{repo_line}"
+                               "Pipeline running — analysing logs and "
+                               "generating fix. Result follows in a few minutes.")}},
+        ],
+    })
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.post(
+                _SLACK_WEBHOOK_URL, content=payload,
+                headers={"Content-Type": "application/json"},
+            )
+        ok = resp.status_code == 200
+        logger.info("slack_pipeline_started build_id=%s ok=%s", build_id, ok)
+        return ok
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning("slack_pipeline_started_failed build_id=%s err=%s",
+                       build_id, exc)
+        return False
