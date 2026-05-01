@@ -29,7 +29,6 @@ from src.gerrit_mcp.gerrit_helpers import (
     rate_limit_wait,
     sanitize_files,
 )
-from src.gerrit_mcp.report_builder import build_report
 
 logger = logging.getLogger(__name__)
 
@@ -110,28 +109,6 @@ class PatchSubmitter:
                         client, repo, branch, file_path, patch,
                         f"auto-heal: fix for build {build_id}",
                     )
-                    if report_data:
-                        report_md = build_report(
-                            build_id=build_id,
-                            colour=report_data.get("colour", "RED"),
-                            confidence=float(report_data.get("confidence", 0.0)),
-                            elapsed_s=int(report_data.get("elapsed_s", 0)),
-                            error_type=str(report_data.get("error_type", "")),
-                            blast_radius=str(report_data.get("blast_radius", "")),
-                            root_cause=str(report_data.get("root_cause", "")),
-                            affected_files=affected_files,
-                            explanation=str(report_data.get("explanation", "")),
-                        )
-                        try:
-                            await self._commit_file(
-                                client, repo, branch,
-                                "AUTO_HEAL_REPORT.md", report_md,
-                                f"auto-heal: rapport för build {build_id}",
-                            )
-                        except Exception as exc:  # pylint: disable=broad-exception-caught
-                            logger.warning(
-                                "report_commit_failed build_id=%s err=%s", build_id, exc
-                            )
                     pr = await self._open_pr(
                         client, repo, pr_title, branch, base_branch,
                         build_id, affected_files, patch, report_data=report_data,
