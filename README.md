@@ -1,334 +1,264 @@
-# Auto-Healing AI DevOps Platform
+<div align="center">
 
-[![Built with Claude Code](https://img.shields.io/badge/Built%20with-Claude%20Code-orange?logo=anthropic)](https://claude.ai/code)
-[![Tests](https://img.shields.io/badge/tests-494%20passing-brightgreen)](tests/)
-[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://python.org)
-[![License](https://img.shields.io/badge/thesis-BTH%202026-lightgrey)](https://www.bth.se)
+# 🤖 Auto-Healing AI DevOps Platform
 
-> **Automated Remediation in CI/CD: Design and Control of an AI-based Code Repair Agent**
->
-> Bachelor Thesis — Blekinge Tekniska Högskola (BTH), 2026
+### Automated Remediation in CI/CD: Design and Control of an AI-based Code Repair Agent
 
----
+[![Tests](https://img.shields.io/badge/tests-494%20passing-brightgreen?style=flat-square)](tests/)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square)](https://python.org)
+[![License](https://img.shields.io/badge/thesis-PA2534%20BTH%202026-lightgrey?style=flat-square)](https://www.bth.se)
+[![Built with Claude Code](https://img.shields.io/badge/Built%20with-Claude%20Code-orange?style=flat-square&logo=anthropic)](https://claude.ai/code)
 
-## Innehållsförteckning / Table of Contents
+**Bachelor Thesis · Blekinge Tekniska Högskola (BTH) · 2026**
 
-0. [Research Questions & Code Mapping](#0-research-questions--code-mapping)
-1. [What the System Does](#1-what-the-system-does)
-2. [The 6 Agents — Architecture](#2-the-6-agents--architecture)
-3. [Complete Pipeline Flow](#3-complete-pipeline-flow)
-4. [Workflow State Machine](#4-workflow-state-machine)
-5. [AI Model System](#5-ai-model-system)
-6. [Traffic Light Safety System](#6-traffic-light-safety-system)
-7. [AI Memory & Learning](#7-ai-memory--learning)
-8. [Adaptive Confidence Thresholds](#8-adaptive-confidence-thresholds)
-9. [Regression Detection](#9-regression-detection)
-10. [Log Processing Pipeline](#10-log-processing-pipeline)
-11. [Security Features](#11-security-features)
-12. [Token & Cost Optimization](#12-token--cost-optimization)
-13. [Resilience System](#13-resilience-system)
-14. [Slack Integration](#14-slack-integration)
-15. [Prometheus Metrics](#15-prometheus-metrics)
-16. [Monitoring & Statistics API](#16-monitoring--statistics-api)
-17. [All API Endpoints](#17-all-api-endpoints)
-18. [Complete Module Reference](#18-complete-module-reference)
-19. [Test Suite](#19-test-suite)
-20. [Installation & Setup](#20-installation--setup)
-21. [Docker & Resource Limits](#21-docker--resource-limits)
-22. [Environment Variables](#22-environment-variables)
-23. [Project Structure](#23-project-structure)
-24. [Authors](#24-authors)
+*Ahmad Darwich · Mouaz Naji · Supervisor: Ahmad Nauman Ghazi*
+
+</div>
 
 ---
 
-## 0. Research Questions & Code Mapping
+## What is this?
 
-This system is the Proof-of-Concept artifact for the bachelor thesis **PA2534** at Blekinge Tekniska Högskola (BTH). The three research questions from Topic.pdf are answered directly by the code:
+A self-healing CI/CD system built in Python. When a build fails on GitHub, **6 AI agents** automatically analyse the error, generate a code fix, run security and quality scans, open a Pull Request — and notify a human for review. The system never merges without human approval.
+
+Built as a research prototype (PoC) to answer three thesis research questions about trust, control mechanisms, and the design of autonomous agents in software engineering pipelines.
 
 ---
 
-### RQ1 — How should an AI code repair agent be designed and controlled in a CI/CD pipeline to accurately detect and fix build failures based on logs?
+## 📋 Table of Contents
 
-| Architectural decision | Code location |
+1. [Research Questions & Code Mapping](#1-research-questions--code-mapping)
+2. [Architecture — The 6 Agents](#2-architecture--the-6-agents)
+3. [Pipeline Flow](#3-pipeline-flow)
+4. [Control Mechanisms (RQ2)](#4-control-mechanisms-rq2)
+5. [Traffic Light Safety System](#5-traffic-light-safety-system)
+6. [Workflow State Machine](#6-workflow-state-machine)
+7. [AI Model System](#7-ai-model-system)
+8. [AI Memory & Learning](#8-ai-memory--learning)
+9. [Log Processing Pipeline](#9-log-processing-pipeline)
+10. [Observability & Monitoring](#10-observability--monitoring)
+11. [Slack Integration](#11-slack-integration)
+12. [Test Suite](#12-test-suite)
+13. [Installation & Setup](#13-installation--setup)
+14. [Environment Variables](#14-environment-variables)
+15. [Project Structure](#15-project-structure)
+16. [Authors](#16-authors)
+
+---
+
+## 1. Research Questions & Code Mapping
+
+> This codebase is the PoC artifact for thesis **PA2534**. Every research question maps directly to running code.
+
+### RQ1 — How should an AI code repair agent be designed to detect and fix build failures from logs?
+
+| Design Decision | Code Location |
 |---|---|
-| **6-agent pipeline** (log clean → analyse → fetch context → generate fix → evaluate → notify) | `src/orchestrator_mcp/pipeline_mixin.py` |
-| **Log compression** — 5-stage regex pipeline strips noise before sending to LLM (~90% token reduction) | `src/log_cleaner_mcp/pipeline.py` |
-| **Error analysis** — regex for 6 error types + LLM fallback, extracts affected files + blast radius | `src/knowledge_graph_mcp/failure_analyser.py` |
-| **Fix generation** — retry loop (6–14 attempts), surgical patch or full-file rewrite, fix memory injection | `src/llm_mcp/fix_generator.py` |
-| **NoneType/call-site hint** — when LLM tunnel-visions on symptom line, hint redirects it to call sites | `src/llm_mcp/fix_validators.py:188` |
-| **Strategy pivot** — repeated identical error type triggers call-site/rewrite pivot in retry prompt | `src/llm_mcp/fix_prompts.py:45` |
-| **4-model fallback chain** — primary → fallback1 → fallback2 → fallback3 → AllModelsFailed | `src/shared/nim_client.py` |
-| **Complexity-based model routing** — LOW/MEDIUM/HIGH score routes to appropriate model tier | `src/shared/task_complexity.py` |
+| 6-agent pipeline: clean → analyse → fetch → generate → evaluate → notify | `src/orchestrator_mcp/pipeline_mixin.py` |
+| 5-stage log compression, ~90% token reduction before LLM | `src/log_cleaner_mcp/pipeline.py` |
+| Regex + LLM fallback error analysis for 6 error types, blast radius | `src/knowledge_graph_mcp/failure_analyser.py` |
+| Fix generation: retry loop 6–14 attempts, surgical patch or full rewrite | `src/llm_mcp/fix_generator.py` |
+| NoneType hint: redirects LLM to call site instead of symptom line | `src/llm_mcp/fix_validators.py:188` |
+| Stuck-loop pivot: identical error type twice → strategy change in prompt | `src/llm_mcp/fix_prompts.py:45` |
+| 4-model fallback chain per agent, complexity-based model routing | `src/shared/nim_client.py`, `src/shared/task_complexity.py` |
 
----
+### RQ2 — What control mechanisms are required to prevent unsafe changes or technical debt?
 
-### RQ2 — What control mechanisms (human-in-the-loop, security scanning, audit trails) are required to ensure the agent does not introduce unsafe changes or technical debt?
-
-| Control mechanism | Implementation | Code location |
+| Control Mechanism | What it does | Code Location |
 |---|---|---|
-| **Human-in-the-Loop (enforced)** | Auto-merge is **disabled**. Every PR — including GREEN — requires a human to merge on GitHub. The AI creates the PR and sends Slack buttons, but cannot merge autonomously. | `src/orchestrator_mcp/github_mixin.py:92` |
-| **YELLOW path — interactive review** | YELLOW PRs send Slack Block Kit message with Approve/Reject buttons. Human decision is fed back to `fix_memory` and `adaptive_thresholds` for learning. | `src/orchestrator_mcp/slack_mixin.py` |
-| **Security scanning (Bandit)** | Every generated fix is scanned for HIGH-severity Python security issues. Detected → LLM retry with feedback. Exhausted budget → `SecretLeakError` → RED. | `src/shared/quality_gates.py:run_bandit_scan` |
-| **Linting (Pylint — real score)** | Real weighted Pylint score via `--output-format=json2`. Errors/warnings reduce confidence modifier. Score < 6.0 → `ok=False` → confidence penalty. | `src/shared/quality_gates.py:run_pylint_check` |
-| **Secret scanner** | 11 regex patterns block hardcoded credentials before GitHub push. | `src/shared/secret_scanner.py` |
-| **Audit trail** | Append-only JSONL log records every pipeline event (start, complete, failed, regression, approve, reject). Never blocks pipeline. | `src/shared/audit_log.py` |
-| **Regression loop prevention** | If the same files fail again after a recent fix, the pipeline returns BLOCKED/RED immediately — no new fix generated. | `src/orchestrator_mcp/pipeline_mixin.py:_check_regression` |
-| **Retry limits** | 6–14 attempts depending on bug count. `FixStillBrokenError` raised on budget exhaustion → pipeline blocked. | `src/llm_mcp/fix_generator.py:_compute_attempt_budget` |
-| **CI loop guard** | GitHub Actions trigger steps have `!startsWith(commit.message, 'auto-heal')` condition — auto-heal commits never re-trigger the healer. | `.github/workflows/auto-heal.yml` |
-| **Protected paths** | AI cannot modify `.github/`, `Dockerfile`, `pyproject.toml`, or other infrastructure files. | `src/gerrit_mcp/gerrit_helpers.py:is_protected_path` |
-| **Deduplication** | MD5 fingerprint of (error_type + root_cause + files) prevents re-processing identical errors within 24 hours. | `src/orchestrator_mcp/deduplication.py` |
+| **Human-in-the-Loop (enforced)** | Auto-merge is **disabled**. Every PR requires a human to merge, regardless of confidence score. | `src/orchestrator_mcp/github_mixin.py:94` |
+| **Bandit security scan** | Scans every generated fix for HIGH-severity issues. Triggers LLM retry with feedback. | `src/shared/quality_gates.py` |
+| **Pylint linting (real score)** | Real weighted score via `--output-format=json2`. Low score reduces confidence. | `src/shared/quality_gates.py` |
+| **Secret scanner** | 11 regex patterns block hardcoded credentials before any GitHub push. | `src/shared/secret_scanner.py` |
+| **Audit trail** | Append-only JSONL log — every pipeline event with UTC timestamp. | `src/shared/audit_log.py` |
+| **Regression loop prevention** | Same files fail again after recent fix → pipeline returns BLOCKED immediately. | `src/orchestrator_mcp/pipeline_mixin.py:200` |
+| **Retry limits** | Max 6–14 attempts by bug complexity. `FixStillBrokenError` on exhaustion. | `src/llm_mcp/fix_generator.py:254` |
+| **CI loop guard** | `!startsWith(commit.message, 'auto-heal')` — healer commits never re-trigger the healer. | `.github/workflows/auto-heal.yml` |
+| **Protected paths** | AI cannot modify `.github/`, `Dockerfile`, `pyproject.toml`, or infra files. | `src/gerrit_mcp/gerrit_helpers.py:is_protected_path` |
+| **Deduplication** | MD5 fingerprint of error+files prevents re-processing the same failure for 24 h. | `src/orchestrator_mcp/deduplication.py` |
 
----
+### RQ3 — What are the primary barriers to trust, and how does the design address them?
 
-### RQ3 — What are the primary barriers to trust for autonomous remediation agents, and how can architectural design mitigate these concerns?
-
-| Trust barrier | Architectural mitigation | Code location |
+| Trust Barrier | Architectural Mitigation | Code Location |
 |---|---|---|
-| **AI may introduce security vulnerabilities** | Bandit scans every generated fix; HIGH issues trigger retry or block | `src/shared/quality_gates.py` |
-| **AI may produce low-quality / unmaintainable code** | Pylint quality score gates; low score reduces confidence → YELLOW/RED | `src/shared/quality_gates.py` |
-| **AI may hallucinate incorrect fixes** | Runtime validation (AST parse + sandboxed subprocess execution) before fix is accepted | `src/llm_mcp/fix_validators.py` |
-| **AI cannot be trusted to merge automatically** | **Human-in-the-Loop enforced** — auto-merge disabled, human must click Merge on GitHub | `src/orchestrator_mcp/github_mixin.py` |
-| **No accountability / traceability** | Audit trail logs every event; PR descriptions include confidence, error type, root cause, agent pipeline, elapsed time | `src/shared/audit_log.py`, `src/gerrit_mcp/patch_submitter.py` |
-| **System may loop infinitely** | Regression detection blocks pipeline on re-failure; CI loop guard prevents self-triggering | `src/orchestrator_mcp/pipeline_mixin.py`, `.github/workflows/` |
-| **AI confidence is opaque** | Traffic light (GREEN/YELLOW/RED) with numeric confidence score, visible in every Slack notification and PR | `src/notification_mcp/traffic_light_evaluator.py` |
-| **Thresholds may not match domain reality** | Adaptive thresholds self-calibrate per error type from human approve/reject decisions | `src/shared/adaptive_thresholds.py` |
+| AI introduces security vulnerabilities | Bandit scan → retry or block | `src/shared/quality_gates.py` |
+| AI produces low-quality code | Pylint real score → confidence penalty | `src/shared/quality_gates.py` |
+| AI hallucinates wrong fixes | AST parse + sandboxed subprocess run before accepting | `src/llm_mcp/fix_validators.py` |
+| AI cannot be trusted to merge | **Auto-merge disabled** — human clicks Merge on GitHub | `src/orchestrator_mcp/github_mixin.py` |
+| No accountability or traceability | Audit trail + PR body with confidence, root cause, elapsed time | `src/shared/audit_log.py` |
+| System loops infinitely | Regression block + CI guard prevent infinite repair cycles | `src/orchestrator_mcp/pipeline_mixin.py` |
+| Confidence score is opaque | Traffic light (🟢🟡🔴) + numeric score in every Slack notification | `src/notification_mcp/traffic_light_evaluator.py` |
+| Thresholds don't fit the domain | Adaptive thresholds self-calibrate from human approve/reject decisions | `src/shared/adaptive_thresholds.py` |
 
 ---
 
-## 1. What the System Does
-
-When a developer pushes code to GitHub, the system reacts automatically:
-
-1. **GitHub Actions** runs the test suite
-2. If tests **fail** → the raw log is sent to the Auto-Healer via ngrok
-3. **6 AI agents** analyze the error, generate a fix, evaluate safety, and notify
-4. A GitHub PR is opened with the fix. A human **must** merge it — auto-merge is disabled to enforce the Human-in-the-Loop requirement. The traffic light (GREEN/YELLOW/RED) and Slack notification guide the reviewer.
-5. Every human decision (Approve/Reject via Slack) **teaches the system** to make better choices next time
-
-**Human-in-the-Loop is always enforced:** the AI proposes, the human decides. This is the core trust mechanism required by the thesis research questions.
-
----
-
-## 2. The 6 Agents — Architecture
+## 2. Architecture — The 6 Agents
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    GitHub Actions / ngrok                       │
-│                    POST /tools/handle_build_failure             │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-                    ┌──────▼──────┐
-                    │ Orchestrator│  Port 8085
-                    │   (Central) │  State machine, pipeline control,
-                    │             │  dedup, rate limit, cost tracking
-                    └──────┬──────┘
-           ┌───────────────┼───────────────────────┐
-           │               │                       │
-    ┌──────▼──────┐ ┌──────▼──────┐        ┌──────▼──────┐
-    │ Log Cleaner │ │   Error     │         │  LLM Code   │
-    │  Agent 3    │ │  Analyst    │         │  Repairer   │
-    │  Port 8081  │ │  Agent 4    │         │  Agent 5    │
-    │             │ │  Port 8084  │         │  Port 8086  │
-    │ 5 filters + │ │ Regex + LLM │         │ Fix memory  │
-    │ LLM fallback│ │ Blast radius│         │ + security  │
-    └─────────────┘ └─────────────┘         └─────────────┘
-                                                    │
-                                            ┌───────▼──────┐
-                                            │  Review &    │
-                                            │   Notify     │
-                                            │  Agent 6     │
-                                            │  Port 8087   │
-                                            │ Adaptive TL  │
-                                            │ Slack notify │
-                                            └──────────────┘
+┌──────────────────────────────────────────────────────┐
+│           GitHub Actions  ──►  ngrok tunnel           │
+│         POST /tools/handle_build_failure              │
+└──────────────────────┬───────────────────────────────┘
+                       │
+              ┌────────▼────────┐
+              │   Orchestrator  │  :8085
+              │  State machine  │  Pipeline control
+              │  Dedup · Rate   │  Cost tracking
+              └────────┬────────┘
+        ┌──────────────┼──────────────────┐
+        │              │                  │
+┌───────▼──────┐ ┌─────▼──────┐  ┌───────▼──────┐
+│  Agent 3     │ │  Agent 4   │  │   Agent 5    │
+│  Log Cleaner │ │  Error     │  │  Code        │
+│  :8081       │ │  Analyst   │  │  Repairer    │
+│  5-stage     │ │  :8084     │  │  :8086       │
+│  regex +     │ │  Regex +   │  │  Fix memory  │
+│  LLM fallbk  │ │  blast rad │  │  + Bandit    │
+└──────────────┘ └────────────┘  │  + Pylint    │
+                                  └───────┬──────┘
+                                          │
+                                 ┌────────▼────────┐
+                                 │   Agent 6       │
+                                 │  Review & Notify│
+                                 │  :8087          │
+                                 │  Adaptive TL    │
+                                 │  Slack · Teams  │
+                                 └─────────────────┘
 
 Supporting services:
-  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-  │Pipeline Mon.│    │  Gerrit MCP │    │  Scheduler  │
-  │  Agent 1   │    │  Port 8083  │    │ Daily Digest│
-  │  Port 8082  │    │ GitHub PRs  │    │ Task polling│
-  └─────────────┘    └─────────────┘    └─────────────┘
+  Gerrit MCP :8083 — GitHub PR creation, branch management
+  Jenkins MCP :8082 — Agent 1, pipeline monitor
+  Scheduler — daily digest, task polling
 ```
 
-### Agent Responsibilities
-
-| Agent | Service | Port | Role |
-|-------|---------|------|------|
-| **Agent 1** — Pipeline Monitor | `jenkins-mcp` | 8082 | Polls GitHub Issues/Jenkins, classifies tasks via NIM |
-| **Agent 2** — Task Inspector | inside scheduler | — | Classifies task as Scenario A (bug) or Scenario B (feature) |
-| **Agent 3** — Log Analyst | `log-cleaner-mcp` | 8081 | 5-stage regex pipeline + LLM fallback for log compression |
-| **Agent 4** — Error Analyst | `knowledge-graph-mcp` | 8084 | Regex + LLM failure analysis, blast radius, affected files |
-| **Agent 5** — Code Repairer | `llm-mcp` | 8086 | Fix generation with memory, secret scanning, quality gates |
-| **Agent 6** — Review & Notify | `notification-mcp` | 8087 | Adaptive traffic light evaluation + Slack/Teams notify |
-| **Orchestrator** | `orchestrator-mcp` | 8085 | Pipeline orchestration, state machine, webhooks |
-| **Gerrit MCP** | `gerrit-mcp` | 8083 | GitHub PR creation, branch management, rate-limit handling |
-| **Scheduler** | `scheduler` | — | Daily digest, task polling, periodic monitors |
+| Agent | Role |
+|---|---|
+| **Agent 1** — Pipeline Monitor (`:8082`) | Polls GitHub Issues/Jenkins, classifies tasks |
+| **Agent 3** — Log Analyst (`:8081`) | 5-stage regex + LLM fallback log compression |
+| **Agent 4** — Error Analyst (`:8084`) | Regex + LLM analysis, blast radius, affected files |
+| **Agent 5** — Code Repairer (`:8086`) | Fix generation with memory, Bandit, Pylint |
+| **Agent 6** — Review & Notify (`:8087`) | Adaptive traffic light + Slack/Teams notification |
+| **Orchestrator** (`:8085`) | Central pipeline, state machine, webhooks |
 
 ---
 
-## 3. Complete Pipeline Flow
+## 3. Pipeline Flow
 
 ```
 POST /tools/handle_build_failure
-        │
-        ├─ Rate limit check (10 req/60s per IP) ──► 429 if exceeded
-        ├─ Input size check (> 500 KB) ────────────► 413 if too large
-        ├─ Duplicate build_id check ───────────────► 409 if already running
-        │
-        ▼ PENDING
-        │
-        ├─ [Agent 3] clean_logs
-        │   • ANSI code removal
-        │   • Timestamp stripping
-        │   • Duplicate line removal
-        │   • Noise line filtering
-        │   • Stack trace extraction
-        │   • LLM fallback if reduction < 50%
-        │
-        ▼ ANALYSING
-        │
-        ├─ [Agent 4] analyze_failure
-        │   • Regex pattern matching (6 error types)
-        │   • Pytest-format file extraction (FAILED tests/foo.py::test_bar)
-        │   • Python traceback file extraction
-        │   • Blast radius calculation (LOW/MEDIUM/HIGH)
-        │   • LLM fallback for UNKNOWN error types
-        │
-        ├─ Regression check: do failing files overlap with a recent fix?
-        │   YES → BLOCKED immediately (audit event logged, no new fix generated)
-        ├─ Deduplication check: same error fingerprint in last 24h?
-        │
-        ├─ [Gerrit MCP] fetch_file (code context for affected files)
-        │
-        ▼ GENERATING_FIX
-        │
-        ├─ [Agent 5] generate_fix
-        │   • Log compression (~90% token reduction)
-        │   • Fix memory context injection (past 3 relevant attempts)
-        │   • Task complexity scoring (LOW/MEDIUM/HIGH)
-        │   • LLM call with quality-adapted model selection
-        │   • Secret scan on generated code
-        │   • Bandit security scan
-        │   • Pylint quality check
-        │   • Confidence adjustment based on quality
-        │   • Retry on security issues (max 2 retries)
-        │
-        ▼ VALIDATING
-        │
-        ├─ [Agent 6] evaluate_and_notify
-        │   • Adaptive traffic light evaluation (per-error-type thresholds)
-        │   • Safety override for HIGH blast radius → always RED
-        │   • Slack/Teams notification
-        │
-        ├─ Deduplication record (cache this error for 24h)
-        ├─ Fix memory record (store outcome for learning)
-        │
-        ├─── GREEN ──► [Gerrit] Create PR (no auto-merge — Human-in-the-Loop enforced)
-        │              Slack notification with confidence score
-        │              Human merges PR on GitHub → webhook → COMPLETED
-        │              Register with regression verifier (60 min watch)
-        │
-        ├─── YELLOW ─► [Gerrit] Create PR (no merge)
-        │              Send Slack interactive buttons (Approve/Reject)
-        │              ▼ AWAITING_REVIEW
-        │              │
-        │              ├─ Human clicks Approve → merge PR → COMPLETED
-        │              │  Feed decision to adaptive thresholds + fix_memory
-        │              └─ Human clicks Reject → close PR → BLOCKED
-        │                 Feed decision to adaptive thresholds + fix_memory
-        │
-        └─── RED ────► No PR created → BLOCKED
+  │
+  ├─ Rate limit (10 req/60s)  ──────────────────────────► 429
+  ├─ Payload size (> 500 KB)  ──────────────────────────► 413
+  ├─ Duplicate build_id       ──────────────────────────► 409
+  │
+  ▼  [Agent 3]  Clean logs
+     • Remove ANSI codes, timestamps, duplicate lines, noise
+     • Extract stack traces  •  LLM fallback if < 50% reduction
+  │
+  ▼  [Agent 4]  Analyse failure
+     • Regex → 6 error types  •  Blast radius (LOW / MEDIUM / HIGH)
+     • Affected files from pytest output and tracebacks
+  │
+  ├─ Regression check ──────── same files recently fixed? ──► BLOCKED ⛔
+  ├─ Deduplication ──────────── same error in 24 h?        ──► cached result
+  │
+  ▼  [Gerrit MCP]  Fetch file content (code context, max 3 files)
+  │
+  ▼  [Agent 5]  Generate fix
+     • Inject fix memory (past 3 relevant outcomes)
+     • Complexity score → model tier (7 B / 32 B / 70 B+)
+     • LLM call  →  parse  →  apply patch
+     • Secret scan  •  Bandit  •  Pylint
+     • Retry on security issues (up to budget)
+  │
+  ▼  [Agent 6]  Evaluate & Notify
+     • Adaptive traffic light: confidence × 0.6 + blast_score × 0.4
+     • HIGH blast radius always forces 🔴 RED
+  │
+  ├─── 🟢 GREEN  ──► PR opened · Slack notification · human merges on GitHub
+  │                  Regression watch activated (60 min)
+  │
+  ├─── 🟡 YELLOW ──► PR opened · Slack Approve / Reject buttons
+  │                  Human decision feeds adaptive thresholds + fix memory
+  │
+  └─── 🔴 RED   ──► No PR · BLOCKED · manual intervention required
 ```
 
 ---
 
-## 4. Workflow State Machine
+## 4. Control Mechanisms (RQ2)
 
-The orchestrator tracks every build through a strict state machine:
+### 🔒 Human-in-the-Loop — Always Enforced
 
-```
-PENDING
-  └─► ANALYSING
-        └─► GENERATING_FIX
-              └─► VALIDATING
-                    ├─► AWAITING_REVIEW ──► APPLYING_FIX ──► COMPLETED
-                    ├─►                └─► BLOCKED
-                    ├─► APPLYING_FIX ──────────────────────► COMPLETED
-                    └─► BLOCKED
+Auto-merge is **permanently disabled**. The relevant code in `github_mixin.py`:
 
-Any state ──► FAILED (on agent crash)
+```python
+# Enforce Human-in-the-Loop: every PR must be reviewed by a human
+# before merging, regardless of the AI confidence score.
+# if auto_merge and pr_number:
+#     await self._merge_pr(client, repo, pr_number)
 ```
 
-**Pruning:**
-- `AWAITING_REVIEW` workflows older than **24 hours** → auto-blocked (human missed the window)
-- Terminal workflows (`COMPLETED`, `FAILED`, `BLOCKED`) older than **48 hours** → removed from memory
-- Pruning runs as a background asyncio task every **3600 seconds**
+The AI generates and opens the PR. A human decides whether to merge it — via Slack buttons (YELLOW) or directly on GitHub (GREEN).
 
 ---
 
-## 5. AI Model System
+### 🛡️ Quality Gates — Run on Every Generated Fix
 
-### NVIDIA NIM Integration
+Both gates run inside Agent 5's retry loop **before** any fix is returned:
 
-All agents call NVIDIA NIM-hosted models via OpenAI-compatible API. Models are configured entirely through environment variables — **never hardcoded**.
+| Gate | Tool | Trigger | Consequence |
+|---|---|---|---|
+| **Security scan** | Bandit `--format json` | HIGH severity issue found | LLM retry with security feedback; budget exhausted → RED |
+| **Linting** | Pylint `--output-format=json2` | Score < 6.0 / 4.0 | Confidence modifier −0.20 / −0.40 |
 
-### 4-Model Fallback Chain
-
-Each agent has up to 4 model slots. If the primary model fails (timeout, error, rate limit), the system automatically switches to the next:
+**Confidence modifier rules:**
 
 ```
-PRIMARY ──► FALLBACK_1 ──► FALLBACK_2 ──► FALLBACK_3 ──► AllModelsFailed exception
+Bandit HIGH issue      →  −0.30
+Pylint score < 6.0     →  −0.20
+Pylint score < 4.0     →  −0.40   (replaces −0.20)
+Both bad               →  stacked, up to −0.70
+All pass               →   0.00
 ```
 
-Every switch is logged and counted in Prometheus (`agent_model_switch_total`).
-
-### Per-Agent Token Budgets
-
-| Agent | Max tokens/request | Max tokens/hour | Input limit | Timeout |
-|-------|-------------------|----------------|------------|---------|
-| Pipeline Monitor | 500 | 5,000 | 1,000 | 10s |
-| Task Inspector | 1,000 | 10,000 | 2,000 | 15s |
-| Log Analyst | 2,000 | 20,000 | 8,000 | 30s |
-| Error Analyst | 3,000 | 30,000 | 6,000 | 30s |
-| Code Repairer | 4,000 | 50,000 | 8,000 | 60s |
-| Review & Notify | 2,000 | 20,000 | 4,000 | 20s |
-
-**Global budget:** 135,000 tokens/hour across all agents. Warning fires at 80%.
-
-### Task Complexity-Based Model Routing
-
-Before calling the LLM, the system scores the error complexity deterministically (no AI needed):
-
-| Score | Complexity | Model tier | Examples |
-|-------|-----------|-----------|---------|
-| 0–2 | **LOW** | 7–8 B parameter model (fast, cheap) | Single assertion error, 1 file |
-| 3–6 | **MEDIUM** | 32 B parameter model (balanced) | Import error, 2–3 files |
-| 7+ | **HIGH** | 70 B+ model (best quality) | Dependency/memory/concurrency, many files |
-
-**Scoring factors:** error type weight + blast radius weight + number of affected files + log length + root cause verbosity.
-
-### Token Tracking
-
-The `TokenTracker` module tracks usage per agent per hour with thread-safe locking. Usage is visible in `/api/stats` and Prometheus gauges.
-
-### Cost Tracking
-
-The `CostTracker` module estimates API cost per build using pricing tiers based on model parameter count:
-
-| Model size | Price/1K tokens |
-|-----------|----------------|
-| < 3B | $0.0001 |
-| 7–8B | $0.0002 |
-| 27–32B | $0.0006 |
-| 70–72B | $0.0018 |
-| 100–125B | $0.0040 |
-| 400B+ | $0.0120 |
-
-Warns when a single build exceeds $0.10. Session totals visible in `/api/stats`.
+Pylint uses the real weighted formula (`statistics.score` from `json2` output), not an approximation. Conventions and refactors are excluded (`--disable=C,R`) so missing docstrings in a patch don't inflate the penalty.
 
 ---
 
-## 6. Traffic Light Safety System
+### 📋 Audit Trail
+
+Every pipeline event is appended to an **append-only JSONL** file with UTC timestamp:
+
+| Event | When logged |
+|---|---|
+| `pipeline_start` | Build failure received |
+| `pipeline_complete` | Pipeline finished (any colour) |
+| `pipeline_failed` | Unhandled exception in any agent |
+| `regression_detected` | Same files fail again after recent fix |
+| `fix_deduplicated` | Error fingerprint matched 24 h cache |
+| `rate_limit_blocked` | IP exceeded rate limit |
+| `pr_approved` | Human clicked Approve in Slack |
+| `pr_rejected` | Human clicked Reject in Slack |
+
+Example record:
+```json
+{"ts":"2026-04-23T12:00:00Z","event":"pipeline_start","build_id":"run-42","repo":"org/repo"}
+```
+
+---
+
+### ♾️ Infinite Loop Prevention
+
+Three complementary mechanisms:
+
+1. **Regression blocking** — `_check_regression()` returns `True` if the failing files were fixed within the last 60 minutes → pipeline immediately returns `BLOCKED/RED`, no new fix generated
+2. **CI guard** — GitHub Actions trigger steps require `!startsWith(head_commit.message, 'auto-heal')`, so healer commits never re-trigger the healer
+3. **Protected paths** — AI cannot modify `.github/`, `Dockerfile`, `pyproject.toml`, `requirements.txt`, or any infra file
+
+---
+
+## 5. Traffic Light Safety System
 
 ### Score Formula
 
@@ -338,261 +268,165 @@ final_score = (llm_confidence × 0.6) + (blast_radius_score × 0.4)
 Blast radius scores:
   LOW    → 1.0
   MEDIUM → 0.6
-  HIGH   → 0.2  (but HIGH always forces RED regardless of score)
+  HIGH   → 0.2  ── HIGH always forces 🔴 RED regardless of confidence
 ```
 
-### Adaptive Thresholds (default values, adapt per error type)
+### Thresholds (adaptive per error type)
 
-| Colour | Default threshold | Action |
-|--------|-----------------|--------|
-| 🟢 **GREEN** | ≥ 0.85 | PR created. Slack notification sent with confidence score. **Human must merge** — auto-merge is disabled (Human-in-the-Loop). Regression watch activated after merge. |
-| 🟡 **YELLOW** | 0.60 – 0.84 | PR created. Slack Approve/Reject buttons sent. Human must approve. 24h review window. |
-| 🔴 **RED** | < 0.60 | No PR. Build blocked. Manual intervention required. |
+| Colour | Default | Action |
+|---|---|---|
+| 🟢 **GREEN** | ≥ 0.85 | PR opened · human merges on GitHub · regression watch started |
+| 🟡 **YELLOW** | 0.60 – 0.84 | PR opened · Slack Approve/Reject buttons · 24 h review window |
+| 🔴 **RED** | < 0.60 | No PR · build blocked · manual intervention required |
 
-**Safety override:** `HIGH` blast radius **always** returns RED, regardless of confidence.
-
-> **Human-in-the-Loop note:** Auto-merge was intentionally disabled to enforce the control mechanism required by RQ2. The traffic light score guides human decision-making but never bypasses it.
+Thresholds are **not fixed** — they self-calibrate per error type. After 5+ human decisions, `new_GREEN = mean(approved_confidences) − 0.03`. Stored in append-only JSONL, cached in memory.
 
 ---
 
-## 7. AI Memory & Learning
+## 6. Workflow State Machine
+
+```
+PENDING
+  └─► ANALYSING
+        └─► GENERATING_FIX
+              └─► VALIDATING
+                    ├─► AWAITING_REVIEW ──► APPLYING_FIX ──► COMPLETED
+                    │         └─────────────────────────────► BLOCKED
+                    ├─► APPLYING_FIX ──────────────────────► COMPLETED
+                    └─► BLOCKED
+
+Any state ──► FAILED  (on agent crash)
+```
+
+- `AWAITING_REVIEW` older than **24 h** → auto-blocked (review window expired)
+- Terminal states older than **48 h** → pruned from memory
+- Pruning runs every **3600 s** as background asyncio task
+
+---
+
+## 7. AI Model System
+
+### NVIDIA NIM — 4-Model Fallback Chain
+
+```
+PRIMARY ──► FALLBACK_1 ──► FALLBACK_2 ──► FALLBACK_3 ──► AllModelsFailed
+```
+
+All models configured via environment variables — nothing hardcoded.
+
+### Complexity-Based Model Routing
+
+| Score | Complexity | Model tier | Typical scenario |
+|---|---|---|---|
+| 0–2 | LOW | 7–8 B (fast, cheap) | Single assertion error, 1 file |
+| 3–6 | MEDIUM | 32 B (balanced) | Import error, 2–3 files |
+| 7+ | HIGH | 70 B+ (best quality) | Dependency / concurrency, many files |
+
+Scoring factors: error type weight + blast radius + number of files + log length.
+
+### Per-Agent Token Budgets
+
+| Agent | Max tokens/req | Max tokens/hour |
+|---|---|---|
+| Log Analyst | 2 000 | 20 000 |
+| Error Analyst | 3 000 | 30 000 |
+| Code Repairer | 4 000 | 50 000 |
+| Review & Notify | 2 000 | 20 000 |
+
+Global budget: **135 000 tokens/hour**. Warning at 80%.
+
+### Cost Tracking
+
+Per-build API cost estimated from model size tiers. Warns when a single build exceeds $0.10. Session totals in `/api/stats`.
+
+---
+
+## 8. AI Memory & Learning
 
 ### Fix Memory (`src/shared/fix_memory.py`)
 
-Every fix attempt is stored in an append-only JSONL file. Each record contains:
-- Timestamp, build ID, error type, root cause hash, affected files
-- Fix preview (first 300 chars of the patch)
-- Outcome (GREEN/YELLOW/RED), confidence score
-- PR URL, human approval status
-
-**Query algorithm:** When the same error type recurs, the system fetches the 3 most relevant past fixes using:
-1. **Exact match** on error type
-2. **Jaccard similarity** on affected file sets: `|A ∩ B| / |A ∪ B|`
-3. **Sort order:** GREEN first, then by file similarity, then by recency
-
-**Prompt injection:** Past fixes are formatted and injected into the LLM prompt:
+Every fix attempt is stored. On the same error type recurring, the 3 most relevant past fixes are fetched using **Jaccard similarity** on affected file sets and injected into the prompt:
 
 ```
 Past fix attempts for this error type (use as reference):
-  [2026-04-20] GREEN (91%) ✓ HUMAN APPROVED: Fixed incorrect assertion in test_calc
-  [2026-04-18] YELLOW (74%) ✗ HUMAN REJECTED — avoid this approach: Changed test to skip
+  [2026-04-20] GREEN (91%) ✓ HUMAN APPROVED: Fixed incorrect assertion in test_calc.py
+  [2026-04-18] YELLOW (74%) ✗ HUMAN REJECTED — avoid: Changed test to skip instead of fixing
   [2026-04-15] RED (38%): Could not identify root cause
 ```
 
-This is **few-shot learning from history** — the AI learns from what worked and avoids what was rejected.
+Human approve/reject decisions update the stored outcome in real time.
 
-**Human feedback loop:** When a human approves or rejects via Slack, `fix_memory.update_outcome()` is called. This updates the approval status in the JSONL file so future queries include the human verdict.
+### Adaptive Thresholds (`src/shared/adaptive_thresholds.py`)
 
-**Statistics API:** `fix_memory.stats()` returns per-error-type success rates (green/yellow/red percentages) used in the daily digest and `/autoheal stats` slash command.
+After 5+ human decisions for an error type:
+- `new_GREEN  = mean(approved_confidences) − 0.03`
+- `new_YELLOW = mean(rejected_confidences) + 0.03`
+- Safe bounds: GREEN ∈ [0.70, 0.95], YELLOW ∈ [0.45, 0.80]
 
----
+### Regression Watch (`src/shared/heal_verifier.py`)
 
-## 8. Adaptive Confidence Thresholds
-
-### `src/shared/adaptive_thresholds.py`
-
-The traffic light thresholds are **not fixed** — they self-calibrate per error type based on what humans actually accept.
-
-**Algorithm:**
-1. Every human approve/reject from Slack is recorded with the fix's confidence score
-2. After 5+ decisions for an error type, thresholds are recalculated:
-   - `new_GREEN = mean(approved_confidences) − 0.03`
-   - `new_YELLOW = mean(rejected_confidences) + 0.03`
-3. Safe bounds enforced: GREEN stays in [70%, 95%], YELLOW in [45%, 80%]
-4. YELLOW is always at least 10 percentage points below GREEN
-
-**Example:** The AI produces ASSERTION_ERROR fixes at 0.72 confidence. Humans approve them 8 times in a row. After the 5th approval, GREEN threshold for ASSERTION_ERROR drops from 0.85 → 0.72, enabling auto-merge for this error type.
-
-**Storage:** Append-only JSONL at `ADAPTIVE_THRESHOLDS_PATH`. Cached in-memory per error type. Cache invalidated on each new decision.
-
-**Visibility:** `/autoheal thresholds` slash command, `/api/stats` response.
+After every fix, affected files are watched for **60 minutes**. Re-failure on the same files → `regression_detected` audit event + pipeline blocked.
 
 ---
 
-## 9. Regression Detection
+## 9. Log Processing Pipeline
 
-### `src/shared/heal_verifier.py`
-
-After a GREEN auto-merge, the system does not simply forget the fix. It activates a **60-minute regression watch**:
-
-1. `heal_verifier.record_fix(build_id, affected_files)` — stores the fix in memory
-2. When the next failure arrives, `heal_verifier.check_regression(new_id, failing_files)` is called
-3. If the failing files **overlap** with a recently fixed build → regression detected:
-   - `regression_detected` audit event logged with original build ID, overlapping files, and age in minutes
-   - Pipeline returns **BLOCKED/RED immediately** — no new fix is generated
-   - Prevents infinite repair loops: the audit trail is an active gate, not just a passive log
-
-**Why this matters:** Without regression blocking, the system would silently generate another fix without realising it was undoing the previous one, creating an infinite repair loop. The audit trail documents the event and the pipeline stops.
-
-**Active watches** are visible in `/api/stats` under `regression_monitor.active_fix_watches`.
-
----
-
-## 10. Log Processing Pipeline
-
-### Agent 3 — Log Analyst (`src/log_cleaner_mcp/`)
-
-Five-stage deterministic pipeline (pure regex, zero latency):
+### Agent 3 — 5-Stage Deterministic Pipeline
 
 | Stage | Module | What it removes |
-|-------|--------|----------------|
-| 1 | `ansi_remover.py` | ANSI escape codes (`\x1b[32m`, colour codes) |
-| 2 | `timestamp_stripper.py` | ISO timestamps, Unix timestamps, log prefixes |
-| 3 | `deduplicator.py` | Duplicate consecutive lines (download progress spam) |
-| 4 | `noise_filter.py` | Dotted progress lines, `---` separators, blank-only lines |
-| 5 | `stack_trace_extractor.py` | Preserves error/traceback lines, drops surrounding noise |
+|---|---|---|
+| 1 | `ansi_remover.py` | ANSI escape codes |
+| 2 | `timestamp_stripper.py` | ISO/Unix timestamps, log prefixes |
+| 3 | `deduplicator.py` | Duplicate consecutive lines |
+| 4 | `noise_filter.py` | Progress dots, separators, blank lines |
+| 5 | `stack_trace_extractor.py` | Keeps error lines, drops surrounding noise |
 
-**LLM fallback:** If the 5-stage pipeline achieves less than 50% line reduction (the log is genuinely complex), Agent 3 falls back to the NIM LLM (7B model) with a focused system prompt to extract diagnostic lines.
+LLM fallback if < 50% line reduction. Typical result: 40 KB log → ~2 KB.
 
-**Output:** `CleanResult` with `cleaned_text`, `reduction_ratio`, `used_llm` flag, and line counts.
+### Prompt Compressor (`src/shared/prompt_compressor.py`)
 
-### Log Compression for LLM Prompts (`src/shared/prompt_compressor.py`)
-
-A second-stage compressor runs before LLM calls in Agent 5:
-
-- Keeps **error lines** (ERROR, FAILED, Exception, AssertionError, Traceback...)
-- Keeps **context window** (2 lines before/after each error line)
-- Keeps **head** (first 5 lines) and **tail** (last 10 lines) of log
-- Marks omitted sections with `... (lines omitted)`
-- Hard-truncates to `max_chars` with `... (truncated)` marker
-
-Result: a 40 KB log → ~2 KB with no diagnostic loss. **~90% token reduction.**
+Second compression before LLM calls in Agent 5: keeps error lines + 2-line context window + head/tail. ~90% token reduction.
 
 ---
 
-## 11. Security Features
+## 10. Observability & Monitoring
 
-### Secret Scanner (`src/shared/secret_scanner.py`)
+### Prometheus Metrics (`/metrics` on every service)
 
-Every AI-generated fix is scanned **before** being pushed to GitHub. Detected pattern types:
+| Metric | Type | Description |
+|---|---|---|
+| `auto_healer_workflows_total` | Counter | By status: completed / failed / blocked |
+| `auto_healer_confidence_score` | Histogram | Traffic light score distribution |
+| `auto_healer_fix_duration_seconds` | Histogram | End-to-end pipeline duration |
+| `auto_healer_quality_gate_results` | Counter | Bandit / Pylint pass & fail counts |
+| `agent_model_switch_total` | Counter | LLM fallback switches per agent |
+| `agent_tokens_used` | Gauge | Tokens used this hour per agent |
 
-| Pattern | Example |
-|---------|---------|
-| AWS Access Key | `AKIAIOSFODNN7EXAMPLE` |
-| AWS Secret Key | `aws_secret_key = "abc123..."` |
-| GitHub Token | `ghp_...`, `ghs_...`, `gho_...`, `ghr_...` |
-| NVIDIA API Key | `nvapi-XYZ...` |
-| Private Key Block | `-----BEGIN RSA PRIVATE KEY-----` |
-| Generic password | `password = "mysecret"` |
-| Bearer token | `Authorization: Bearer eyJ...` |
-| Slack Token | `xoxb-...`, `xoxp-...` |
-| Stripe Key | `sk_live_...`, `pk_live_...` |
-| JWT Token | `eyJ...` (3-part format) |
-| Hex secret 40-char | `token = "a1b2c3..."` (40 hex chars) |
+### Statistics API — `GET /api/stats`
 
-**Safe patterns excluded:** Lines with `os.getenv()`, `os.environ`, `process.env`, `# example`, `YOUR_KEY_HERE` are not flagged.
+Returns a live snapshot:
 
-**On detection:** The fix is blocked and the AI is asked to rewrite using environment variables (up to 2 retries). If all retries fail, `SecretLeakError` is raised and the pipeline returns RED.
-
-### Rate Limiting (`src/orchestrator_mcp/rate_limiter.py`)
-
-- **Sliding window counter** per client IP address
-- Default: **10 requests per 60 seconds**
-- Uses `deque` for O(1) append/pop, thread-safe with `threading.Lock`
-- Returns HTTP **429** with `retry_after_seconds: 60` when exceeded
-- Prometheus gauge tracks active keys
-
-### Input Size Cap
-
-- `raw_log` payload larger than **500 KB** → HTTP **413 Payload Too Large**
-- Prevents memory exhaustion from malformed or malicious payloads
-
-### Slack Signature Verification (`src/notification_mcp/slack_slash_handler.py`)
-
-All Slack webhooks and slash commands are verified using Slack's HMAC-SHA256 protocol:
-
-```
-base_string = f"v0:{timestamp}:{request_body}"
-expected    = "v0=" + HMAC-SHA256(SLACK_SIGNING_SECRET, base_string)
+```json
+{
+  "workflows":   { "by_status": {"COMPLETED": 40, "AWAITING_REVIEW": 2, "BLOCKED": 5} },
+  "cost":        { "session_total_usd": 0.023, "avg_cost_per_build_usd": 0.0005 },
+  "audit_log":   { "event_counts": { "pipeline_start": 47, "regression_detected": 1 } },
+  "regression_monitor": { "active_fix_watches": [...] },
+  "adaptive_thresholds": { "ASSERTION_ERROR": { "green_threshold": 0.78, "adapted": true } }
+}
 ```
 
-- **Replay attack prevention:** Requests older than 5 minutes are rejected
-- Returns HTTP **403** on invalid signature
-- Falls back gracefully if `SLACK_SIGNING_SECRET` is not set (logs warning)
+### Resilience — Circuit Breaker
 
-### GitHub Webhook Signature
+CLOSED → (5 failures / 60 s) → OPEN → (30 s cooldown) → HALF_OPEN → CLOSED
 
-All GitHub PR events verified with `X-Hub-Signature-256` (HMAC-SHA256) when `GITHUB_WEBHOOK_SECRET` is configured.
-
-### Quality Gates on Generated Code
-
-Before any fix is returned, Agent 5 runs two quality scanners:
-
-| Gate | Tool | Checks | Consequence |
-|------|------|--------|-------------|
-| **Bandit** | `run_bandit_scan()` | Python security issues — HIGH severity | Retry with security feedback; exhausted budget → RED |
-| **Pylint** | `run_pylint_check()` | Real weighted score via `--output-format=json2` (errors + warnings, conventions/refactors excluded) | Score < 6.0 → confidence −0.20 or −0.40 |
-
-Both gates run on every AI-generated fix before the fix is returned. Results are combined by `evaluate_quality()` into a `QualityScore` with a confidence modifier that directly shifts the traffic light verdict.
-
-**Confidence modifier rules:**
-
-| Condition | Modifier |
-|-----------|---------|
-| Bandit: ≥ 1 HIGH issue | −0.30 |
-| Pylint: score < 6.0 | −0.20 |
-| Pylint: score < 4.0 | −0.40 |
-| Both bad | stacked (up to −0.70) |
+Independent breaker per service: NIM API, GitHub API, Slack, Teams.
 
 ---
 
-## 12. Token & Cost Optimization
+## 11. Slack Integration
 
-Five independent optimization layers working together:
-
-| Layer | Module | Mechanism | Typical saving |
-|-------|--------|-----------|----------------|
-| **Log compression** | `prompt_compressor.py` | Keep error lines only | ~90% token reduction |
-| **Deduplication** | `deduplication.py` | Skip pipeline for repeated errors | 100% saving for repeated failures |
-| **Fix memory** | `fix_memory.py` | Inject only 3 past examples, capped at 800 chars | Avoids unbounded context growth |
-| **Per-agent budgets** | `config.py` | Hard token limits per agent per hour | Prevents runaway costs |
-| **Surgical patches** | `fix_parsers.py` | LLM returns `changed_lines` only (1-based line edits) | ~70% smaller fixes, fewer retries |
-
-### Deduplication Cache (`src/orchestrator_mcp/deduplication.py`)
-
-Creates an MD5 fingerprint from `error_type + root_cause[:200] + sorted(files)`. Cache window: **24 hours**. On cache hit, returns `{deduplicated: true, original_build, cache_age_min}` without running any AI agents.
-
----
-
-## 13. Resilience System
-
-### Circuit Breaker (`src/shared/resilience.py`)
-
-Independent circuit breaker for each external dependency:
-
-| Service | Breaker name |
-|---------|-------------|
-| NVIDIA NIM API | `llm_api` |
-| GitHub API | `github_api` |
-| Jenkins API | `jenkins_api` |
-| Microsoft Teams | `teams_webhook` |
-| Slack | `slack_webhook` |
-
-**States:** CLOSED (normal) → OPEN (5 failures within 60s) → HALF_OPEN (30s cooldown) → CLOSED (on success)
-
-### Per-Agent Internal Retries
-
-Each agent that calls the LLM (Agents 4, 5) carries its own retry policy with exponential backoff. The orchestrator's per-call HTTP timeouts (`LLM_FIX_TIMEOUT=1200s`, `GERRIT_FETCH_TIMEOUT=10s`) are configured to exceed these internal budgets so retries always finish before the outer connection times out.
-
-### Global Fallback
-
-If any agent crashes or returns an invalid response:
-1. `handle_agent_failure()` records the event in Prometheus (`agent_fallback_triggered_total`)
-2. `trigger_global_fallback()` sends a RED payload directly to Agent 6
-3. Agent 6 sends an immediate Slack alert
-4. The workflow is marked FAILED — never stuck in a non-terminal state
-
-### Correlation IDs
-
-Every pipeline run generates a UUID correlation ID (`X-Request-ID` header) that is propagated to all 6 agent calls. This allows a single build to be traced across log lines from 6 different services using a single search.
-
----
-
-## 14. Slack Integration
-
-### Interactive Buttons (YELLOW path)
-
-When Agent 6 evaluates a fix as YELLOW, a Slack Block Kit message is sent with two buttons:
+### YELLOW Path — Interactive Review Buttons
 
 ```
 🟡 Human Review Required
@@ -606,704 +440,284 @@ PR: [View on GitHub →]
 [✅ Approve & Merge]    [❌ Reject]
 ```
 
-**On Approve:** GitHub PR is merged via API. Original Slack message is updated to show "✅ Fix Applied". Feeds decision to `fix_memory` and `adaptive_thresholds`.
+Human clicks feed back to `fix_memory` and `adaptive_thresholds`.
 
-**On Reject:** GitHub PR is closed. Slack message updated to "❌ Fix Rejected". Feeds decision to `fix_memory` and `adaptive_thresholds`.
-
-**Response URL:** Slack responses are sent via the original message's `response_url` so the message is updated in-place (not a new message).
-
-### Microsoft Teams Integration
-
-`teams_notifier.py` sends equivalent notifications to a Teams channel via incoming webhook. Runs in parallel with Slack notification.
-
-### Slash Commands (`/autoheal`)
-
-9 commands, all with HMAC-SHA256 signature verification:
+### `/autoheal` Slash Commands (9 commands)
 
 | Command | Description |
-|---------|-------------|
-| `/autoheal status <build_id>` | Current workflow state, colour, last update time, error message |
-| `/autoheal list` | Last 10 workflows with colour emoji and status |
-| `/autoheal stats` | Fix success rates by error type (GREEN/YELLOW/RED %) |
-| `/autoheal retry <build_id>` | Re-submit a failed build to the pipeline |
-| `/autoheal explain <build_id>` | Plain-English explanation of what the AI found and fixed |
-| `/autoheal rollback <build_id>` | Close the associated GitHub PR (undo the fix) |
-| `/autoheal history <file_path>` | All past fixes for a specific source file |
-| `/autoheal top` | Most problematic files (sorted by failure count, all time) |
-| `/autoheal thresholds` | Current adaptive confidence thresholds per error type |
+|---|---|
+| `/autoheal status <build_id>` | Workflow state, colour, last update |
+| `/autoheal list` | Last 10 workflows with colour emoji |
+| `/autoheal stats` | Fix success rates by error type |
+| `/autoheal retry <build_id>` | Re-submit a failed build |
+| `/autoheal explain <build_id>` | Plain-English explanation of the fix |
+| `/autoheal rollback <build_id>` | Close the associated PR |
+| `/autoheal history <file>` | All past fixes for a specific file |
+| `/autoheal top` | Most problematic files (by failure count) |
+| `/autoheal thresholds` | Current adaptive thresholds per error type |
 
-### Daily Intelligence Digest (`src/scheduler/daily_digest.py`)
+All slash commands verified with HMAC-SHA256 signature + 5-minute replay-attack window.
 
-Every morning at **08:00 UTC** (configurable via `DIGEST_HOUR_UTC`), the system posts a rich Slack report:
+### Daily Digest
 
-```
-🤖 Auto-Healer Daily Report — Friday, April 25
-
-Builds: 47  |  Auto-fixed (GREEN): 85%  |  Reviews sent: 6  |  Blocked: 1
-API cost (session): $0.023  |  Avg cost per build: $0.0005
-
-📊 Top Error Types:
-  • ASSERTION_ERROR — 28 occurrences (🟢 89%)
-  • IMPORT_ERROR — 12 occurrences (🟢 75%)
-  • TYPE_ERROR — 7 occurrences (🟢 71%)
-
-🗂️ Most Troubled Files:
-  • tests/test_payments.py — 8 failures
-  • src/auth/validator.py — 5 failures
-
-🧠 Adaptive Thresholds:
-  2 error types with self-adjusted thresholds: ASSERTION_ERROR, TYPE_ERROR
-
-🔍 Regression Monitor:
-  Watching 3 recently deployed fixes for regressions
-
-💡 Recommendation:
-  tests/test_payments.py has failed 8 times recently.
-  Consider adding stronger unit tests or refactoring this module.
-```
+Every morning at 08:00 UTC: builds processed, success rates, top error types, troubled files, threshold adaptations, regression watch status.
 
 ---
 
-## 15. Prometheus Metrics
+## 12. Test Suite
 
-All 8 services expose `/metrics` in Prometheus text format.
+**494 tests passing** · 9 pre-existing failures in blast-radius tests (unrelated to any recent changes)
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `auto_healer_workflows_total` | Counter | Workflows processed by status (completed/failed/blocked) |
-| `auto_healer_confidence_score` | Histogram | Traffic light score distribution (buckets: 0, 0.3, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0) |
-| `auto_healer_fix_duration_seconds` | Histogram | End-to-end pipeline duration (buckets: 5s, 10s, 30s, 60s, 120s, 300s) |
-| `auto_healer_log_reduction_ratio` | Gauge | Agent 3's last log reduction percentage |
-| `auto_healer_quality_gate_results` | Counter | Bandit/Pylint pass/fail counts by gate name |
-| `agent_model_switch_total` | Counter | LLM model switches per agent and reason |
-| `agent_tokens_used` | Gauge | Tokens used this hour per agent |
-| `agent_token_budget_remaining` | Gauge | Remaining hourly token budget per agent |
-| `agent_fallback_triggered_total` | Counter | Global fallback events per agent |
+<details>
+<summary>Unit test coverage (click to expand)</summary>
 
----
+| Category | Key tests |
+|---|---|
+| Fix Memory | record, query, Jaccard similarity, approval stamps |
+| Adaptive Thresholds | calibration algorithm, safe bounds, cache |
+| Heal Verifier | regression detection, file overlap, expiry |
+| Secret Scanner | all 11 patterns, safe-pattern exclusions |
+| Quality Gates | Bandit scan, real Pylint score, confidence modifiers |
+| Fix Helpers | NoneType hint, error fingerprint, strategy pivot |
+| Circuit Breaker | CLOSED → OPEN → HALF_OPEN → CLOSED |
+| Model Fallback | chain, AllModelsFailed, slot reset |
+| Workflow Engine | state transitions, InvalidTransitionError, pruning |
+| GitHub Webhook | HMAC signature, branch parsing |
+| Traffic Light | adaptive thresholds, safety override, score formula |
+| Log Cleaner | each of 5 filters individually + full pipeline |
+| Error Analyst | all 6 error types, pytest format, blast radius |
+| Code Repairer | parsing, retry, FixTooLongError, SecretLeakError |
+| Gerrit MCP | PR creation, rate-limit headers, code fetching |
 
-## 16. Monitoring & Statistics API
+</details>
 
-### `GET /api/stats`
+<details>
+<summary>Integration tests</summary>
 
-Returns a complete system snapshot:
-
-```json
-{
-  "workflows": {
-    "by_status":        {"COMPLETED": 40, "AWAITING_REVIEW": 2, "BLOCKED": 5},
-    "total":            47,
-    "active":           2,
-    "pruned_this_call": {"pruned": 0, "timed_out": 0}
-  },
-  "tokens_used_this_hour": {
-    "code_repairer": 45000,
-    "error_analyst": 12000
-  },
-  "cost": {
-    "session_total_usd":     0.023,
-    "builds_tracked":        47,
-    "avg_cost_per_build_usd": 0.0005
-  },
-  "deduplication": {
-    "cache_size": 12
-  },
-  "rate_limiter": {
-    "active_keys": {"127.0.0.1": 3}
-  },
-  "audit_log": {
-    "event_counts": {
-      "pipeline_start":    47,
-      "pipeline_complete": 44,
-      "pipeline_failed":   3,
-      "regression_detected": 1
-    },
-    "recent_events": [...]
-  },
-  "regression_monitor": {
-    "active_fix_watches": [
-      {"build_id": "build-123", "fixed_files": ["src/foo.py"], "age_minutes": 12.3}
-    ]
-  },
-  "adaptive_thresholds": {
-    "ASSERTION_ERROR": {"green_threshold": 0.78, "yellow_threshold": 0.57, "adapted": true},
-    "IMPORT_ERROR":    {"green_threshold": 0.85, "yellow_threshold": 0.60, "adapted": false}
-  }
-}
-```
-
-### Audit Log (`src/shared/audit_log.py`)
-
-Every pipeline event is appended to an append-only JSONL file:
-
-| Event | When |
-|-------|------|
-| `pipeline_start` | Build failure received |
-| `pipeline_complete` | Pipeline finished (any colour) |
-| `pipeline_failed` | Unhandled exception |
-| `rate_limit_blocked` | IP exceeded rate limit |
-| `fix_deduplicated` | Error fingerprint matched cache |
-| `regression_detected` | Re-failure on recently fixed files |
-| `pr_approved` | Human clicked Approve in Slack |
-| `pr_rejected` | Human clicked Reject in Slack |
-| `pipeline_retry` | `/autoheal retry` called |
-
----
-
-## 17. All API Endpoints
-
-### Orchestrator (port 8085)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/tools/handle_build_failure` | **Main entry point.** Runs full pipeline. |
-| `GET` | `/tools/get_workflow_status` | Query status by `?build_id=` |
-| `POST` | `/tools/retry_build` | Re-queue a failed build |
-| `GET` | `/api/stats` | System-wide statistics snapshot |
-| `POST` | `/webhooks/github` | GitHub PR webhook (merge/approve events) |
-| `POST` | `/webhooks/slack` | Slack interactive button callbacks |
-| `POST` | `/webhooks/slack/commands` | Slack `/autoheal` slash commands |
-| `POST` | `/workflows` | Register a workflow (REST) |
-| `GET` | `/workflows/active` | List all active workflows |
-| `GET` | `/workflows/{build_id}` | Get workflow state |
-| `POST` | `/workflows/{build_id}/advance` | Manually advance state |
-| `GET` | `/health` | Health check → `{"status":"ok"}` |
-| `GET` | `/metrics` | Prometheus metrics |
-
-### Log Cleaner (port 8081)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/tools/clean_logs` | Run 5-stage log cleaning pipeline |
-| `GET` | `/health` | Health check |
-| `GET` | `/metrics` | Prometheus metrics |
-
-### Knowledge Graph / Error Analyst (port 8084)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/tools/analyze_failure` | Regex + LLM failure analysis |
-| `GET` | `/health` | Health check |
-| `GET` | `/metrics` | Prometheus metrics |
-
-### LLM / Code Repairer (port 8086)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/tools/generate_fix` | Generate code fix with quality gates |
-| `GET` | `/health` | Health check |
-| `GET` | `/metrics` | Prometheus metrics |
-
-### Notification / Review & Notify (port 8087)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/tools/evaluate_and_notify` | Traffic light evaluation + Slack/Teams notification |
-| `GET` | `/health` | Health check |
-| `GET` | `/metrics` | Prometheus metrics |
-
-### Gerrit MCP (port 8083)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/tools/fetch_file` | Fetch file content from GitHub |
-| `POST` | `/tools/submit_patch` | Create GitHub PR with fix |
-| `GET` | `/health` | Health check |
-
-### Jenkins / Pipeline Monitor (port 8082)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/tools/fetch_logs` | Fetch build logs from Jenkins/GitHub |
-| `POST` | `/webhooks/jenkins` | Receive Jenkins build events |
-| `GET` | `/health` | Health check |
-
----
-
-## 18. Complete Module Reference
-
-### `src/shared/` — Shared Infrastructure
-
-| Module | Description |
-|--------|-------------|
-| `models.py` | Domain models: `BuildEvent`, `FailureAnalysis`, `CodeFix`, `TrafficLightResult`, `WorkflowState`. All enums: `ErrorType`, `BlastRadius`, `WorkflowStatus`, `TrafficLightColour`, `TaskScenario` |
-| `config.py` | `AgentModelConfig` dataclass, `AGENT_CONFIGS` dict, `SERVICE_URLS`, global token budget |
-| `nim_client.py` | NVIDIA NIM OpenAI-compatible client. `NimClient.complete()` with 4-slot fallback chain, token tracking, structured logging |
-| `model_fallback.py` | `ModelFallbackManager` — tracks current slot, switches on failure, resets on success, raises `AllModelsFailed` |
-| `task_complexity.py` | `score_complexity()` returns `Complexity.LOW/MEDIUM/HIGH`. Deterministic — no AI needed, instant scoring |
-| `resilience.py` | `CircuitBreaker`, `handle_agent_failure()`, `trigger_global_fallback()` |
-| `quality_gates.py` | `run_bandit_scan()`, `run_pylint_check()`, `evaluate_quality()`. Uses `tempfile.NamedTemporaryFile` (no security vulnerability) |
-| `secret_scanner.py` | `scan_for_secrets()`. 11 regex patterns, safe-pattern exclusions, `SecretScanResult` dataclass |
-| `prompt_compressor.py` | `compress_log()`. Error-aware log compression with context window and hard truncation |
-| `fix_memory.py` | `FixMemory` class: `record()`, `update_outcome()`, `query()` (Jaccard similarity), `stats()`. `build_memory_context()` formats for LLM prompts |
-| `adaptive_thresholds.py` | `AdaptiveThresholds`: `record_decision()`, `get_thresholds()`, `summary()`. Self-calibrating per error type |
-| `heal_verifier.py` | `HealVerifier`: `record_fix()`, `check_regression()`, `active_fixes()`. 60-minute regression watch window |
-| `audit_log.py` | Append-only JSONL event stream. `AuditLog.log()`, `tail()`, `summary()`. Graceful fallback to Python logger |
-| `cost_tracker.py` | Per-build API cost estimation. `CostTracker.record()`, `session_summary()`. Pricing tiers by model size |
-| `token_tracker.py` | Thread-safe per-agent token counting with hourly reset. `usage_snapshot()` |
-| `metrics.py` | Prometheus counters, histograms, and gauges. `generate_metrics_output()` |
-| `mcp_base.py` | `MCPServiceBase` — base class for all aiohttp services. Registers `/health` and `/metrics` |
-
-### `src/orchestrator_mcp/` — Central Pipeline Controller
-
-The orchestrator was originally one 1253-line `server.py`. It has been split into focused mixin modules (each ≤ ~480 lines) so each area can be edited and debugged in isolation:
-
-| Module | Description |
-|--------|-------------|
-| `server.py` | `OrchestratorMCPServer` — thin shell composing the mixins below + lifecycle (pruner) |
-| `pipeline_mixin.py` | `handle_build_failure` + the Agent 3→4→5→6 pipeline split into per-step methods (`_step_clean_logs`, `_step_analyse`, `_step_fetch_context`, `_step_generate_fix`, `_step_notify`, `_finalise`) |
-| `pipeline_helpers.py` | Pure helpers — FAILED_FILE regex, ERROR_TYPE map, FILE_CONTENT extractor |
-| `github_mixin.py` | PR creation, GitHub webhook + HMAC signature verify. Auto-merge disabled — Human-in-the-Loop enforced. |
-| `slack_mixin.py` | Slack interactive Approve / Reject button handler |
-| `workflow_api_mixin.py` | REST CRUD for workflows |
-| `admin_mixin.py` | `/api/stats`, `retry_build`, `review_code` (AI-triggered healing) |
-| `workflow.py` | `WorkflowEngine` state machine. `VALID_TRANSITIONS` graph. `prune_stale()`, `stats()` |
-| `deduplication.py` | `DeduplicationCache`. MD5 fingerprinting of error signatures. 24h cache window |
-| `rate_limiter.py` | `RateLimiter`. Sliding-window counter per IP. Thread-safe deque |
-| `tools.py` | MCP tool definitions for orchestrator |
-
-### `src/llm_mcp/` — Code Repairer
-
-`fix_generator.py` was originally 757 lines. The validators, prompt-builder, and parser have been extracted so the main file focuses on the LLM retry loop:
-
-| Module | Description |
-|--------|-------------|
-| `fix_generator.py` | `FixGenerator.generate_fix()` — the retry loop. Integrates log compression, fix memory, complexity scoring, secret scanner, bandit, pylint |
-| `fix_validators.py` | Static + runtime gates (AST parse, self-assignment detector, sandboxed subprocess run, NoneType call-site hint) |
-| `fix_prompts.py` | `build_retry_prompt()` (fingerprint-based stuck-loop detection + strategy pivot), `extract_bug_list()` |
-| `fix_parsers.py` | `apply_surgical_patch()`, `parse_response()` |
-| `prompt_templates.py` | `SYSTEM_PROMPT`, `SCENARIO_A_TEMPLATE`, `COMPLEX_REPAIR_TEMPLATE`, line-count constants |
-| `server.py` | aiohttp server for Agent 5 |
-| `tools.py` | MCP tool definitions |
-
-### `src/log_cleaner_mcp/` — Log Analyst
-
-| Module | Description |
-|--------|-------------|
-| `pipeline.py` | `CleanResult` dataclass. `clean_pipeline()` orchestrating all 5 filters + LLM fallback |
-| `filters/ansi_remover.py` | Removes ANSI escape sequences |
-| `filters/timestamp_stripper.py` | Strips ISO/Unix timestamps and log prefixes |
-| `filters/deduplicator.py` | Removes duplicate consecutive lines |
-| `filters/noise_filter.py` | Removes progress dots, separators, empty lines |
-| `filters/stack_trace_extractor.py` | Extracts error/traceback lines |
-| `server.py` | aiohttp server for Agent 3 |
-
-### `src/knowledge_graph_mcp/` — Error Analyst
-
-| Module | Description |
-|--------|-------------|
-| `failure_analyser.py` | `FailureAnalyser.analyze()`. Regex patterns for 6 error types. Pytest-format file extraction. LLM fallback for UNKNOWN |
-| `dependency_tracker.py` | `DependencyTracker` — tracks file dependency graph for blast radius calculation |
-| `server.py` | aiohttp server for Agent 4 |
-
-### `src/notification_mcp/` — Review & Notify
-
-| Module | Description |
-|--------|-------------|
-| `traffic_light_evaluator.py` | `evaluate_traffic_light()` with adaptive thresholds |
-| `slack_notifier.py` | `send_slack_review_buttons()`. Block Kit templates for GREEN/YELLOW/RED. Approve/Reject button construction |
-| `slack_slash_handler.py` | 9 slash commands with HMAC-SHA256 verification — one `_cmd_*` function per sub-command |
-| `slash_responses.py` | Pure response builders (status / list / stats / explain / history / top / thresholds blocks) |
-| `teams_notifier.py` | Microsoft Teams adaptive card notifications |
-| `server.py` | aiohttp server for Agent 6 |
-
-### `src/scheduler/` — Background Tasks
-
-| Module | Description |
-|--------|-------------|
-| `monitor.py` | `ScheduledMonitor`. Polls GitHub Issues / Jira. Routes tasks via TaskClassifier |
-| `task_classifier.py` | `TaskClassifier`. Regex heuristics → NIM LLM for A/B/YELLOW classification |
-| `daily_digest.py` | `DailyDigest.send()`. Builds Slack Block Kit report from live stats |
-
-### `src/gerrit_mcp/` — GitHub PR Manager
-
-| Module | Description |
-|--------|-------------|
-| `patch_submitter.py` | `PatchSubmitter.submit()`. Creates branch, commits files, opens PR. Rate-limit handling (Retry-After / X-RateLimit-Reset headers). Finds existing PR on 422 |
-| `code_fetcher.py` | `CodeFetcher.fetch()`. Reads file content from GitHub API via `SERVICE_URLS` |
-| `github_approver.py` | `extract_build_id()` from branch name `auto-heal/{build_id}` |
-| `server.py` | aiohttp server |
-
-### `src/jenkins_mcp/` — Pipeline Monitor
-
-| Module | Description |
-|--------|-------------|
-| `log_fetcher.py` | Fetches build logs from Jenkins or GitHub Actions |
-| `webhook_handler.py` | Processes incoming Jenkins build events |
-| `nim_client.py` | Agent 1's own NIM client instance |
-| `server.py` | aiohttp server for Agent 1 |
-
----
-
-## 19. Test Suite
-
-**540 tests passing** (21 skipped — they require live Docker services or were tied to dead-code modules removed during the cleanup).
-
-### Unit Tests — `tests/unit/`
-
-| Category | File(s) | Coverage |
-|----------|---------|---------|
-| **Fix Memory** | `test_fix_memory.py` | record, query, Jaccard similarity, approval stamps, stats |
-| **Adaptive Thresholds** | `test_adaptive_thresholds.py` | calibration algorithm, safe bounds, cache invalidation |
-| **Heal Verifier** | `test_heal_verifier.py` | regression detection, file overlap, expiry window |
-| **Secret Scanner** | `test_secret_scanner.py` | all 11 pattern types, safe exclusions |
-| **Prompt Compressor** | `test_prompt_compressor.py` | error preservation, size limits, head/tail sections |
-| **Task Complexity** | `test_task_complexity.py` | scoring algorithm, LOW/MEDIUM/HIGH boundaries |
-| **Task Classifier** | `test_task_classifier.py` | Scenario A/B classification, NIM fallback, YELLOW escalation |
-| **Circuit Breaker** | `test_circuit_breaker.py` | CLOSED→OPEN→HALF_OPEN→CLOSED transitions |
-| **Model Fallback** | `test_model_fallback.py` | fallback chain, AllModelsFailed, slot reset |
-| **Token Tracker** | `test_token_tracker.py` | thread safety, hourly reset, usage snapshot |
-| **Quality Gates** | `test_quality_gates.py` | bandit scan, pylint check, confidence modifier |
-| **Resilience Async** | `test_resilience_async.py` | global fallback notifier — RED payload |
-| **Models** | `test_models.py` | dataclass fields, enum values, serialisation |
-| **Workflow Engine** | `test_workflow.py` | state transitions, InvalidTransitionError, pruning |
-| **GitHub Webhook** | `test_github_webhook.py` | HMAC signature verification, branch parsing |
-| **Traffic Light** | `test_traffic_light.py` + `test_edge_cases.py` | adaptive thresholds, safety override, score formula |
-| **Log Cleaner** | `test_pipeline.py` + 5 filter tests | each filter individually, full pipeline combination |
-| **Error Analyst** | `test_failure_analyser.py` + `test_edge_cases.py` | all 6 error types, pytest format, blast radius |
-| **Code Repairer** | `test_fix_generator.py` + edge cases | parsing, retry, FixTooLongError, SecretLeakError |
-| **Gerrit MCP** | 4 test files | PR creation, rate-limit headers, code fetching |
-| **Notifiers** | 3 test files | Block Kit rendering, Slack/Teams notifications |
-| **Scheduler** | `test_scheduler_monitor.py` | task polling, classification |
-
-### Integration Tests — `tests/integration/`
-
-| File | What it tests |
-|------|---------------|
-| `test_full_pipeline.py` | GREEN/YELLOW path, 400/409/413/429 errors, dedup, fix_memory recording |
-| `test_analysis_pipeline.py` | Log cleaner → error analyst chain, traffic light green/yellow/red, safety override |
-| `test_global_fallback.py` | Agent crash → RED notification, FAILED workflow state |
+| File | What it verifies |
+|---|---|
+| `test_full_pipeline.py` | GREEN/YELLOW path, 400/409/413/429, dedup, fix_memory |
+| `test_analysis_pipeline.py` | Log cleaner → error analyst → traffic light chain |
+| `test_global_fallback.py` | Agent crash → RED notification, FAILED state |
 | `test_quality_gates_integration.py` | Bandit + Pylint in pipeline context |
-| `test_webhook_to_clean.py` | Webhook event → log cleaner flow |
-| `test_smoke.py` | ⚠️ Live Docker: health checks, /metrics, log reduction |
-| `test_load.py` | ⚠️ Live Docker: concurrent pipelines, state isolation |
+| `test_smoke.py` | ⚠️ Requires live Docker: health, /metrics |
+| `test_load.py` | ⚠️ Requires live Docker: concurrent pipelines |
 
-### Running Tests
+</details>
 
 ```bash
-# All unit tests (fast, no Docker)
+# All unit tests (no Docker needed)
 python3 -m pytest tests/unit/ -v
-
-# Integration pipeline tests (in-process aiohttp + respx mocks)
-python3 -m pytest tests/integration/test_full_pipeline.py -v
 
 # Full suite
 python3 -m pytest tests/ -q
-
-# Specific module
-python3 -m pytest tests/unit/test_shared/test_adaptive_thresholds.py -v
 ```
 
 ---
 
-## 20. Installation & Setup
+## 13. Installation & Setup
 
 ### Requirements
 
-- Docker Desktop (WSL2 integration enabled on Windows)
+- Docker Desktop (WSL2 on Windows)
 - Python 3.11+
-- ngrok account (free tier is sufficient)
-- GitHub repository
-- Slack workspace with an app
+- ngrok account (free tier)
+- GitHub repo + Slack workspace app
 
-### Step 1 — Clone and Configure
+### Quick Start
 
 ```bash
+# 1. Clone and configure
 git clone https://github.com/Mouaz7/auto-healing-devops-platform.git
 cd auto-healing-devops-platform
 cp .env.example .env
-# Edit .env and fill in all required values
-```
+# Fill in your API keys in .env
 
-### Step 2 — Start All Services
-
-```bash
+# 2. Start all 8 services
 docker compose up --build
-# Wait for all 8 containers to show "Started"
-```
 
-### Step 3 — Start ngrok Tunnel
-
-```bash
-# In a new terminal:
+# 3. Expose the orchestrator (new terminal)
 ngrok http --url=<your-static-domain> 8085
-# Forwarding: https://your-domain.ngrok-free.dev → http://localhost:8085
-```
 
-### Step 4 — Verify
-
-```bash
+# 4. Verify
 curl http://localhost:8085/health
 # → {"status": "ok", "service": "orchestrator_mcp"}
-
-curl http://localhost:8085/api/stats
-# → full system stats JSON
-
-# Run demo
-source venv/bin/activate
-python scripts/demo.py
 ```
 
-### Step 5 — GitHub Actions
+### GitHub Actions Workflow
 
-The `.github/workflows/auto-heal.yml` is already included in this repository. It triggers on every push and pull request:
+The `.github/workflows/auto-heal.yml` already handles the loop:
 
 ```yaml
-name: Auto-Healing Pipeline
-
-on: [push, pull_request]
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: pip install pytest
-
-      - name: Run tests
-        id: run_tests
-        run: python -m pytest tests/ -v || true
-
-      - name: Trigger Auto-Healing on failure
-        if: failure()
-        run: |
-          curl -X POST https://YOUR-DOMAIN.ngrok-free.dev/tools/handle_build_failure \
-            -H "Content-Type: application/json" \
-            -d '{
-              "build_id": "${{ github.run_id }}",
-              "repo":     "${{ github.repository }}",
-              "branch":   "${{ github.ref_name }}",
-              "scenario": "A",
-              "raw_log":  "Build failed on commit ${{ github.sha }}"
-            }'
+- name: Trigger Auto-Healing on failure
+  # Loop guard: auto-heal commits must not re-trigger the healer
+  if: |
+    failure() &&
+    !startsWith(github.event.head_commit.message, 'auto-heal')
+  run: |
+    curl -X POST https://YOUR-DOMAIN.ngrok-free.dev/tools/handle_build_failure \
+      -H "Content-Type: application/json" \
+      -d '{
+        "build_id": "${{ github.run_id }}",
+        "repo":     "${{ github.repository }}",
+        "raw_log":  "..."
+      }'
 ```
 
-Replace `YOUR-DOMAIN.ngrok-free.dev` with your actual ngrok static domain. With ngrok Pro you can reserve a permanent subdomain so the workflow file never needs updating.
+### Slack App Setup
 
-### Step 6 — Slack App Configuration
+1. **Interactivity & Shortcuts** → Request URL: `https://your-domain/webhooks/slack`
+2. **Slash Commands** → `/autoheal` → `https://your-domain/webhooks/slack/commands`
+3. **Basic Information** → copy `Signing Secret` → `SLACK_SIGNING_SECRET` in `.env`
+4. **Incoming Webhooks** → copy URL → `SLACK_WEBHOOK_URL` in `.env`
 
-1. Go to [api.slack.com/apps](https://api.slack.com/apps) → Your App
-2. **Interactivity & Shortcuts** → Turn ON → Request URL:
-   ```
-   https://your-domain.ngrok-free.dev/webhooks/slack
-   ```
-3. **Slash Commands** → Add `/autoheal` → Request URL:
-   ```
-   https://your-domain.ngrok-free.dev/webhooks/slack/commands
-   ```
-4. **Basic Information** → copy `Signing Secret` → add to `.env` as `SLACK_SIGNING_SECRET`
-5. **Incoming Webhooks** → Add webhook → copy URL → add to `.env` as `SLACK_WEBHOOK_URL`
+### GitHub Webhook
 
-### Step 7 — GitHub Webhook
-
-In your GitHub repo → **Settings → Webhooks → Add webhook:**
-- Payload URL: `https://your-domain.ngrok-free.dev/webhooks/github`
-- Content type: `application/json`
-- Secret: (same value as `GITHUB_WEBHOOK_SECRET` in `.env`)
-- Events: `Pull requests`, `Pull request reviews`
+Settings → Webhooks → Add webhook:
+- URL: `https://your-domain/webhooks/github`
+- Events: `Pull requests` + `Pull request reviews`
+- Secret: matches `GITHUB_WEBHOOK_SECRET` in `.env`
 
 ---
 
-## 21. Docker & Resource Limits
-
-All 8 services run in `docker-compose.yml` on an isolated `agent-network` bridge network:
-
-| Container | CPU limit | Memory limit | Memory reservation |
-|-----------|-----------|-------------|-------------------|
-| `orchestrator-mcp` | 1.00 | 512 MB | 128 MB |
-| `llm-mcp` | 1.00 | 512 MB | 128 MB |
-| `knowledge-graph-mcp` | 1.00 | 512 MB | 128 MB |
-| `log-cleaner-mcp` | 0.50 | 256 MB | 64 MB |
-| `gerrit-mcp` | 0.50 | 256 MB | 64 MB |
-| `notification-mcp` | 0.50 | 256 MB | 64 MB |
-| `jenkins-mcp` | 0.25 | 128 MB | 32 MB |
-| `scheduler` | 0.25 | 128 MB | 32 MB |
-
-All services use `restart: unless-stopped` and share the `agent-network` bridge.
-
----
-
-## 22. Environment Variables
+## 14. Environment Variables
 
 ### Required
 
 | Variable | Description |
-|----------|-------------|
+|---|---|
 | `NVIDIA_NIM_BASE_URL` | NVIDIA NIM API base URL |
-| `PIPELINE_MONITOR_PRIMARY_API_KEY` | API key for Agent 1 |
-| `PIPELINE_MONITOR_PRIMARY_MODEL` | Model name for Agent 1 |
-| `LOG_ANALYST_PRIMARY_API_KEY` | API key for Agent 3 |
-| `LOG_ANALYST_PRIMARY_MODEL` | Model name for Agent 3 |
-| `ERROR_ANALYST_PRIMARY_API_KEY` | API key for Agent 4 |
-| `ERROR_ANALYST_PRIMARY_MODEL` | Model name for Agent 4 |
 | `CODE_REPAIRER_PRIMARY_API_KEY` | API key for Agent 5 |
 | `CODE_REPAIRER_PRIMARY_MODEL` | Model name for Agent 5 |
+| `ERROR_ANALYST_PRIMARY_API_KEY` | API key for Agent 4 |
+| `ERROR_ANALYST_PRIMARY_MODEL` | Model name for Agent 4 |
+| `LOG_ANALYST_PRIMARY_API_KEY` | API key for Agent 3 |
+| `LOG_ANALYST_PRIMARY_MODEL` | Model name for Agent 3 |
 | `REVIEW_NOTIFY_PRIMARY_API_KEY` | API key for Agent 6 |
 | `REVIEW_NOTIFY_PRIMARY_MODEL` | Model name for Agent 6 |
-| `GITHUB_TOKEN` | GitHub Personal Access Token (scopes: repo, workflow) |
+| `GITHUB_TOKEN` | Personal Access Token (scopes: `repo`, `workflow`) |
 | `GITHUB_REPO` | Target repo in `owner/repo` format |
 | `SLACK_WEBHOOK_URL` | Slack incoming webhook URL |
 
 ### Recommended
 
 | Variable | Description |
-|----------|-------------|
+|---|---|
 | `GITHUB_WEBHOOK_SECRET` | HMAC secret for GitHub webhook verification |
-| `SLACK_SIGNING_SECRET` | HMAC secret for Slack webhook + slash command verification |
-| `*_FALLBACK_1/2/3` | Fallback model names per agent |
-| `*_FALLBACK_1/2/3_API_KEY` | Fallback API keys per agent |
+| `SLACK_SIGNING_SECRET` | HMAC secret for Slack verification |
+| `*_FALLBACK_1/2/3` + `*_FALLBACK_1/2/3_API_KEY` | Fallback models per agent |
 
-### Optional
+<details>
+<summary>Optional variables with defaults</summary>
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `FIX_MEMORY_PATH` | `/var/log/auto-healer/fix_memory.jsonl` | AI fix history file |
-| `ADAPTIVE_THRESHOLDS_PATH` | `/var/log/auto-healer/adaptive_thresholds.jsonl` | Threshold learning file |
-| `AUDIT_LOG_PATH` | `/var/log/auto-healer/audit.jsonl` | Audit trail file |
-| `MODEL_LOW_PRIMARY` | `qwen/qwen2.5-coder-7b-instruct` | Model for LOW complexity |
-| `MODEL_LOW_FALLBACK_1` | `google/gemma-3-12b-it` | Fallback for LOW complexity |
-| `MODEL_MED_PRIMARY` | `qwen/qwen2.5-coder-32b-instruct` | Model for MEDIUM complexity |
-| `MODEL_MED_FALLBACK_1` | `meta/llama-3.1-70b-instruct` | Fallback for MEDIUM complexity |
-| `DIGEST_HOUR_UTC` | `8` | Hour (0–23) to send daily Slack digest |
+|---|---|---|
+| `FIX_MEMORY_PATH` | `/var/log/auto-healer/fix_memory.jsonl` | AI fix history |
+| `ADAPTIVE_THRESHOLDS_PATH` | `/var/log/auto-healer/adaptive_thresholds.jsonl` | Threshold learning |
+| `AUDIT_LOG_PATH` | `/var/log/auto-healer/audit.jsonl` | Audit trail |
+| `MODEL_LOW_PRIMARY` | `qwen/qwen2.5-coder-7b-instruct` | LOW complexity model |
+| `MODEL_MED_PRIMARY` | `qwen/qwen2.5-coder-32b-instruct` | MEDIUM complexity model |
+| `DIGEST_HOUR_UTC` | `8` | Daily Slack digest hour |
 | `SCHEDULE_INTERVAL_MINUTES` | `15` | GitHub Issues polling interval |
-| `LOG_CLEANER_URL` | `http://localhost:8081` | Internal service URL |
-| `JENKINS_URL` | `http://localhost:8082` | Internal service URL |
-| `GERRIT_URL` | `http://localhost:8083` | Internal service URL |
-| `KNOWLEDGE_GRAPH_URL` | `http://localhost:8084` | Internal service URL |
-| `ORCHESTRATOR_URL` | `http://localhost:8085` | Internal service URL |
-| `LLM_URL` | `http://localhost:8086` | Internal service URL |
-| `NOTIFICATION_URL` | `http://localhost:8087` | Internal service URL |
+
+</details>
+
+### Docker Resource Limits
+
+| Container | CPU | Memory |
+|---|---|---|
+| `orchestrator-mcp` | 1.00 | 512 MB |
+| `llm-mcp` | 1.00 | 512 MB |
+| `knowledge-graph-mcp` | 1.00 | 512 MB |
+| `log-cleaner-mcp` | 0.50 | 256 MB |
+| `gerrit-mcp` | 0.50 | 256 MB |
+| `notification-mcp` | 0.50 | 256 MB |
+| `jenkins-mcp` | 0.25 | 128 MB |
+| `scheduler` | 0.25 | 128 MB |
 
 ---
 
-## 23. Project Structure
+## 15. Project Structure
 
 ```
 auto-healing-devops-platform/
-│
-├── docker-compose.yml            # 8 services, resource limits, agent-network
-├── Dockerfile                    # Multi-stage build
-├── .env.example                  # Environment template (copy to .env)
-├── pyproject.toml                # pytest config (asyncio AUTO mode)
-├── requirements.txt              # Python dependencies
+├── docker-compose.yml              # 8 services, resource limits, agent-network
+├── Dockerfile                      # Multi-stage build
+├── pyproject.toml                  # Dependencies (bandit + pylint in main deps)
+├── .env.example
 │
 ├── src/
-│   ├── shared/                   # Shared infrastructure (all agents import from here)
-│   │   ├── models.py             # Domain models + enums
-│   │   ├── config.py             # Agent configs, SERVICE_URLS, LLM_FIX_TIMEOUT
-│   │   ├── nim_client.py         # NVIDIA NIM LLM client (4-slot fallback)
-│   │   ├── model_fallback.py     # ModelFallbackManager
-│   │   ├── task_complexity.py    # Deterministic complexity scorer
-│   │   ├── resilience.py         # Circuit breaker + global fallback notifier
-│   │   ├── quality_gates.py      # Bandit + Pylint code quality
-│   │   ├── secret_scanner.py     # Hardcoded secret detection
-│   │   ├── prompt_compressor.py  # Log compression for LLM prompts
-│   │   ├── fix_memory.py         # AI learning from past fix outcomes
-│   │   ├── adaptive_thresholds.py# Self-calibrating traffic light thresholds
-│   │   ├── heal_verifier.py      # Post-merge regression detection
-│   │   ├── audit_log.py          # Append-only JSONL audit trail
-│   │   ├── cost_tracker.py       # Per-build API cost estimation
-│   │   ├── token_tracker.py      # Thread-safe per-agent token counting
-│   │   ├── metrics.py            # Prometheus metrics definitions
-│   │   └── mcp_base.py           # Base aiohttp server class
+│   ├── shared/                     # Shared infrastructure
+│   │   ├── quality_gates.py        # Bandit + Pylint quality gates
+│   │   ├── audit_log.py            # Append-only JSONL audit trail
+│   │   ├── fix_memory.py           # AI learning from past outcomes
+│   │   ├── adaptive_thresholds.py  # Self-calibrating traffic light thresholds
+│   │   ├── heal_verifier.py        # 60-min regression watch
+│   │   ├── secret_scanner.py       # 11-pattern hardcoded credential detection
+│   │   ├── prompt_compressor.py    # ~90% token reduction
+│   │   ├── task_complexity.py      # Deterministic complexity scorer
+│   │   ├── resilience.py           # Circuit breaker + global fallback
+│   │   ├── nim_client.py           # NVIDIA NIM client, 4-slot fallback
+│   │   └── models.py               # Domain models, enums
 │   │
-│   ├── orchestrator_mcp/         # Port 8085 — Central controller
-│   │   ├── server.py             # Thin shell — composes mixins + lifecycle
-│   │   ├── pipeline_mixin.py     # handle_build_failure + 4-step pipeline
-│   │   ├── pipeline_helpers.py   # Pure helpers (regex, ERROR_TYPE map)
-│   │   ├── github_mixin.py       # PR creation, GitHub webhook (HITL — auto-merge disabled)
-│   │   ├── slack_mixin.py        # Slack Approve / Reject buttons
-│   │   ├── workflow_api_mixin.py # REST CRUD for workflows
-│   │   ├── admin_mixin.py        # /api/stats, retry, AI code review
-│   │   ├── workflow.py           # State machine + pruning
-│   │   ├── deduplication.py      # 24h error fingerprint cache
-│   │   └── rate_limiter.py       # Sliding-window rate limiter
+│   ├── orchestrator_mcp/           # :8085 — Central pipeline controller
+│   │   ├── pipeline_mixin.py       # handle_build_failure + Agent 3→4→5→6
+│   │   ├── github_mixin.py         # PR creation (HITL — auto-merge disabled)
+│   │   ├── slack_mixin.py          # Approve / Reject button handler
+│   │   ├── workflow.py             # State machine + pruning
+│   │   └── deduplication.py        # 24h error fingerprint cache
 │   │
-│   ├── log_cleaner_mcp/          # Port 8081 — Agent 3
-│   │   ├── pipeline.py           # 5-stage cleaning pipeline
-│   │   └── filters/              # ansi, timestamp, dedup, noise, stack_trace
+│   ├── llm_mcp/                    # :8086 — Agent 5, Code Repairer
+│   │   ├── fix_generator.py        # Retry loop: LLM → validate → Bandit → Pylint
+│   │   ├── fix_validators.py       # AST + sandboxed run + NoneType hint
+│   │   ├── fix_prompts.py          # Retry prompt builder + stuck-loop pivot
+│   │   └── fix_parsers.py          # Surgical patch + JSON parser
 │   │
-│   ├── jenkins_mcp/              # Port 8082 — Agent 1
-│   │   ├── log_fetcher.py
-│   │   └── webhook_handler.py
+│   ├── knowledge_graph_mcp/        # :8084 — Agent 4, Error Analyst
+│   │   ├── failure_analyser.py     # Regex + LLM, 6 error types, blast radius
+│   │   └── dependency_tracker.py
 │   │
-│   ├── gerrit_mcp/               # Port 8083 — GitHub PR manager
-│   │   ├── patch_submitter.py    # PR creation with rate-limit handling
-│   │   ├── code_fetcher.py       # File content from GitHub API
-│   │   └── github_approver.py    # Branch → build_id extraction
+│   ├── log_cleaner_mcp/            # :8081 — Agent 3
+│   │   ├── pipeline.py             # 5-stage cleaning + LLM fallback
+│   │   └── filters/                # ansi · timestamp · dedup · noise · stacktrace
 │   │
-│   ├── knowledge_graph_mcp/      # Port 8084 — Agent 4
-│   │   ├── failure_analyser.py   # Regex + LLM error analysis
-│   │   └── dependency_tracker.py # Blast radius calculation
+│   ├── notification_mcp/           # :8087 — Agent 6, Review & Notify
+│   │   ├── traffic_light_evaluator.py  # Adaptive thresholds
+│   │   ├── slack_notifier.py           # Block Kit + interactive buttons
+│   │   ├── slack_slash_handler.py      # 9 slash commands
+│   │   └── teams_notifier.py
 │   │
-│   ├── llm_mcp/                  # Port 8086 — Agent 5
-│   │   ├── fix_generator.py      # FixGenerator retry loop
-│   │   ├── fix_validators.py     # Syntax + runtime gates + NoneType hint
-│   │   ├── fix_prompts.py        # Retry prompt builder + stuck-loop pivot
-│   │   ├── fix_parsers.py        # Surgical patch + JSON parser
-│   │   └── prompt_templates.py   # System + user prompts
+│   ├── gerrit_mcp/                 # :8083 — GitHub PR manager
+│   │   ├── patch_submitter.py      # Branch, commit, PR, rate-limit handling
+│   │   └── gerrit_helpers.py       # Protected paths, sanitize_files
 │   │
-│   ├── notification_mcp/         # Port 8087 — Agent 6
-│   │   ├── traffic_light_evaluator.py  # Adaptive traffic light
-│   │   ├── slack_notifier.py     # Block Kit templates + interactive buttons
-│   │   ├── slack_slash_handler.py# 9 slash commands
-│   │   ├── slash_responses.py    # Pure response builders
-│   │   └── teams_notifier.py     # Microsoft Teams adaptive cards
-│   │
-│   └── scheduler/                # Background tasks
-│       ├── monitor.py            # GitHub Issues / Jira polling
-│       ├── task_classifier.py    # Agent 2: A/B/YELLOW classification
-│       └── daily_digest.py       # Morning Slack intelligence report
+│   └── scheduler/                  # Background tasks
+│       ├── daily_digest.py         # Morning Slack intelligence report
+│       └── task_classifier.py      # Agent 2: Scenario A/B classification
 │
-├── tests/
-│   ├── unit/                     # Unit tests (no Docker, no network)
-│   │   ├── test_shared/          # Shared infrastructure modules
-│   │   ├── test_code_repairer/   # Agent 5 tests
-│   │   ├── test_error_analyst/   # Agent 4 tests
-│   │   ├── test_gerrit_mcp/      # PR creation tests
-│   │   ├── test_log_cleaner/     # All 5 filter tests + pipeline
-│   │   ├── test_orchestrator/    # Workflow, webhooks, mixins
-│   │   ├── test_pipeline_monitor/# Agent 1 tests
-│   │   ├── test_review_notify/   # Agent 6 tests
-│   │   └── test_traffic_light/   # Traffic light edge cases
-│   │
-│   └── integration/              # End-to-end pipeline tests
-│       ├── test_full_pipeline.py # GREEN, YELLOW, 400/409/413/429, dedup
-│       ├── test_analysis_pipeline.py  # Log cleaner + error analyst + TL chain
-│       ├── test_global_fallback.py    # Agent crash → RED
-│       ├── test_quality_gates_integration.py
-│       ├── test_webhook_to_clean.py
-│       ├── test_smoke.py         # ⚠️ Requires live Docker services
-│       └── test_load.py          # ⚠️ Requires live Docker services
-│
-├── scripts/
-│   └── demo.py                   # Full pipeline demonstration
-│
-└── docs/                         # Architecture docs + thesis chapters
+└── tests/
+    ├── unit/                       # 494 passing (no Docker)
+    └── integration/                # End-to-end pipeline tests
 ```
 
 ---
 
-## 24. Authors
+## 16. Authors
 
-| Name | Email | Role |
-|------|-------|------|
-| Ahmad Darwich | ahda23@student.bth.se | Author |
-| Mouaz Naji | moap23@student.bth.se | Author |
+| Name | Email | Program |
+|---|---|---|
+| Ahmad Darwich | ahda23@student.bth.se | Software Engineering |
+| Mouaz Naji | moap23@student.bth.se | Software Engineering |
 
-**Supervisor:** Ahmad Nauman Ghazi — nauman.ghazi@bth.se
-
-**Institution:** Blekinge Tekniska Högskola (BTH), Sweden
-
-**Thesis title:** Automated Remediation in CI/CD: Design and Control of an AI-based Code Repair Agent
+**Supervisor:** Ahmad Nauman Ghazi — nauman.ghazi@bth.se  
+**Institution:** Blekinge Tekniska Högskola (BTH), Sweden  
+**Course:** PA2534 — Kandidatarbete i Programvaruteknik  
+**Title:** *Automated Remediation in CI/CD: Design and Control of an AI-based Code Repair Agent*
 
 ---
 
-*This project is a bachelor thesis and is not licensed for commercial use.*
+<div align="center">
+
+*This project is a bachelor thesis prototype and is not licensed for commercial use.*
+
+</div>
