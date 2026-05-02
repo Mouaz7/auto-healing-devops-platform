@@ -1,7 +1,7 @@
 # Auto-Healing AI DevOps Platform
 
 [![Built with Claude Code](https://img.shields.io/badge/Built%20with-Claude%20Code-orange?logo=anthropic)](https://claude.ai/code)
-[![Tests](https://img.shields.io/badge/tests-540%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-494%20passing-brightgreen)](tests/)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://python.org)
 [![License](https://img.shields.io/badge/thesis-BTH%202026-lightgrey)](https://www.bth.se)
 
@@ -13,6 +13,7 @@
 
 ## Innehållsförteckning / Table of Contents
 
+0. [Research Questions & Code Mapping](#0-research-questions--code-mapping)
 1. [What the System Does](#1-what-the-system-does)
 2. [The 6 Agents — Architecture](#2-the-6-agents--architecture)
 3. [Complete Pipeline Flow](#3-complete-pipeline-flow)
@@ -40,6 +41,60 @@
 
 ---
 
+## 0. Research Questions & Code Mapping
+
+This system is the Proof-of-Concept artifact for the bachelor thesis **PA2534** at Blekinge Tekniska Högskola (BTH). The three research questions from Topic.pdf are answered directly by the code:
+
+---
+
+### RQ1 — How should an AI code repair agent be designed and controlled in a CI/CD pipeline to accurately detect and fix build failures based on logs?
+
+| Architectural decision | Code location |
+|---|---|
+| **6-agent pipeline** (log clean → analyse → fetch context → generate fix → evaluate → notify) | `src/orchestrator_mcp/pipeline_mixin.py` |
+| **Log compression** — 5-stage regex pipeline strips noise before sending to LLM (~90% token reduction) | `src/log_cleaner_mcp/pipeline.py` |
+| **Error analysis** — regex for 6 error types + LLM fallback, extracts affected files + blast radius | `src/knowledge_graph_mcp/failure_analyser.py` |
+| **Fix generation** — retry loop (6–14 attempts), surgical patch or full-file rewrite, fix memory injection | `src/llm_mcp/fix_generator.py` |
+| **NoneType/call-site hint** — when LLM tunnel-visions on symptom line, hint redirects it to call sites | `src/llm_mcp/fix_validators.py:188` |
+| **Strategy pivot** — repeated identical error type triggers call-site/rewrite pivot in retry prompt | `src/llm_mcp/fix_prompts.py:45` |
+| **4-model fallback chain** — primary → fallback1 → fallback2 → fallback3 → AllModelsFailed | `src/shared/nim_client.py` |
+| **Complexity-based model routing** — LOW/MEDIUM/HIGH score routes to appropriate model tier | `src/shared/task_complexity.py` |
+
+---
+
+### RQ2 — What control mechanisms (human-in-the-loop, security scanning, audit trails) are required to ensure the agent does not introduce unsafe changes or technical debt?
+
+| Control mechanism | Implementation | Code location |
+|---|---|---|
+| **Human-in-the-Loop (enforced)** | Auto-merge is **disabled**. Every PR — including GREEN — requires a human to merge on GitHub. The AI creates the PR and sends Slack buttons, but cannot merge autonomously. | `src/orchestrator_mcp/github_mixin.py:92` |
+| **YELLOW path — interactive review** | YELLOW PRs send Slack Block Kit message with Approve/Reject buttons. Human decision is fed back to `fix_memory` and `adaptive_thresholds` for learning. | `src/orchestrator_mcp/slack_mixin.py` |
+| **Security scanning (Bandit)** | Every generated fix is scanned for HIGH-severity Python security issues. Detected → LLM retry with feedback. Exhausted budget → `SecretLeakError` → RED. | `src/shared/quality_gates.py:run_bandit_scan` |
+| **Linting (Pylint — real score)** | Real weighted Pylint score via `--output-format=json2`. Errors/warnings reduce confidence modifier. Score < 6.0 → `ok=False` → confidence penalty. | `src/shared/quality_gates.py:run_pylint_check` |
+| **Secret scanner** | 11 regex patterns block hardcoded credentials before GitHub push. | `src/shared/secret_scanner.py` |
+| **Audit trail** | Append-only JSONL log records every pipeline event (start, complete, failed, regression, approve, reject). Never blocks pipeline. | `src/shared/audit_log.py` |
+| **Regression loop prevention** | If the same files fail again after a recent fix, the pipeline returns BLOCKED/RED immediately — no new fix generated. | `src/orchestrator_mcp/pipeline_mixin.py:_check_regression` |
+| **Retry limits** | 6–14 attempts depending on bug count. `FixStillBrokenError` raised on budget exhaustion → pipeline blocked. | `src/llm_mcp/fix_generator.py:_compute_attempt_budget` |
+| **CI loop guard** | GitHub Actions trigger steps have `!startsWith(commit.message, 'auto-heal')` condition — auto-heal commits never re-trigger the healer. | `.github/workflows/auto-heal.yml` |
+| **Protected paths** | AI cannot modify `.github/`, `Dockerfile`, `pyproject.toml`, or other infrastructure files. | `src/gerrit_mcp/gerrit_helpers.py:is_protected_path` |
+| **Deduplication** | MD5 fingerprint of (error_type + root_cause + files) prevents re-processing identical errors within 24 hours. | `src/orchestrator_mcp/deduplication.py` |
+
+---
+
+### RQ3 — What are the primary barriers to trust for autonomous remediation agents, and how can architectural design mitigate these concerns?
+
+| Trust barrier | Architectural mitigation | Code location |
+|---|---|---|
+| **AI may introduce security vulnerabilities** | Bandit scans every generated fix; HIGH issues trigger retry or block | `src/shared/quality_gates.py` |
+| **AI may produce low-quality / unmaintainable code** | Pylint quality score gates; low score reduces confidence → YELLOW/RED | `src/shared/quality_gates.py` |
+| **AI may hallucinate incorrect fixes** | Runtime validation (AST parse + sandboxed subprocess execution) before fix is accepted | `src/llm_mcp/fix_validators.py` |
+| **AI cannot be trusted to merge automatically** | **Human-in-the-Loop enforced** — auto-merge disabled, human must click Merge on GitHub | `src/orchestrator_mcp/github_mixin.py` |
+| **No accountability / traceability** | Audit trail logs every event; PR descriptions include confidence, error type, root cause, agent pipeline, elapsed time | `src/shared/audit_log.py`, `src/gerrit_mcp/patch_submitter.py` |
+| **System may loop infinitely** | Regression detection blocks pipeline on re-failure; CI loop guard prevents self-triggering | `src/orchestrator_mcp/pipeline_mixin.py`, `.github/workflows/` |
+| **AI confidence is opaque** | Traffic light (GREEN/YELLOW/RED) with numeric confidence score, visible in every Slack notification and PR | `src/notification_mcp/traffic_light_evaluator.py` |
+| **Thresholds may not match domain reality** | Adaptive thresholds self-calibrate per error type from human approve/reject decisions | `src/shared/adaptive_thresholds.py` |
+
+---
+
 ## 1. What the System Does
 
 When a developer pushes code to GitHub, the system reacts automatically:
@@ -47,10 +102,10 @@ When a developer pushes code to GitHub, the system reacts automatically:
 1. **GitHub Actions** runs the test suite
 2. If tests **fail** → the raw log is sent to the Auto-Healer via ngrok
 3. **6 AI agents** analyze the error, generate a fix, evaluate safety, and notify
-4. The fix is either **auto-merged** (GREEN), **sent for human review** (YELLOW), or **blocked** (RED)
-5. Every human decision **teaches the system** to make better choices next time
+4. A GitHub PR is opened with the fix. A human **must** merge it — auto-merge is disabled to enforce the Human-in-the-Loop requirement. The traffic light (GREEN/YELLOW/RED) and Slack notification guide the reviewer.
+5. Every human decision (Approve/Reject via Slack) **teaches the system** to make better choices next time
 
-The system requires **zero developer interaction** for high-confidence failures and gets smarter with every run.
+**Human-in-the-Loop is always enforced:** the AI proposes, the human decides. This is the core trust mechanism required by the thesis research questions.
 
 ---
 
@@ -140,6 +195,7 @@ POST /tools/handle_build_failure
         │   • LLM fallback for UNKNOWN error types
         │
         ├─ Regression check: do failing files overlap with a recent fix?
+        │   YES → BLOCKED immediately (audit event logged, no new fix generated)
         ├─ Deduplication check: same error fingerprint in last 24h?
         │
         ├─ [Gerrit MCP] fetch_file (code context for affected files)
@@ -167,9 +223,10 @@ POST /tools/handle_build_failure
         ├─ Deduplication record (cache this error for 24h)
         ├─ Fix memory record (store outcome for learning)
         │
-        ├─── GREEN ──► [Gerrit] Create PR → Auto-merge
+        ├─── GREEN ──► [Gerrit] Create PR (no auto-merge — Human-in-the-Loop enforced)
+        │              Slack notification with confidence score
+        │              Human merges PR on GitHub → webhook → COMPLETED
         │              Register with regression verifier (60 min watch)
-        │              ▼ APPLYING_FIX → COMPLETED
         │
         ├─── YELLOW ─► [Gerrit] Create PR (no merge)
         │              Send Slack interactive buttons (Approve/Reject)
@@ -288,11 +345,13 @@ Blast radius scores:
 
 | Colour | Default threshold | Action |
 |--------|-----------------|--------|
-| 🟢 **GREEN** | ≥ 0.85 | PR created + auto-merged immediately. Regression watch activated. |
-| 🟡 **YELLOW** | 0.60 – 0.84 | PR created. Slack Approve/Reject buttons sent. 24h review window. |
+| 🟢 **GREEN** | ≥ 0.85 | PR created. Slack notification sent with confidence score. **Human must merge** — auto-merge is disabled (Human-in-the-Loop). Regression watch activated after merge. |
+| 🟡 **YELLOW** | 0.60 – 0.84 | PR created. Slack Approve/Reject buttons sent. Human must approve. 24h review window. |
 | 🔴 **RED** | < 0.60 | No PR. Build blocked. Manual intervention required. |
 
 **Safety override:** `HIGH` blast radius **always** returns RED, regardless of confidence.
+
+> **Human-in-the-Loop note:** Auto-merge was intentionally disabled to enforce the control mechanism required by RQ2. The traffic light score guides human decision-making but never bypasses it.
 
 ---
 
@@ -359,11 +418,11 @@ After a GREEN auto-merge, the system does not simply forget the fix. It activate
 1. `heal_verifier.record_fix(build_id, affected_files)` — stores the fix in memory
 2. When the next failure arrives, `heal_verifier.check_regression(new_id, failing_files)` is called
 3. If the failing files **overlap** with a recently fixed build → regression detected:
-   - `regression_detected` audit event logged
-   - Warning logged with original build ID, overlapping files, and age in minutes
-   - New build is still processed normally (not skipped)
+   - `regression_detected` audit event logged with original build ID, overlapping files, and age in minutes
+   - Pipeline returns **BLOCKED/RED immediately** — no new fix is generated
+   - Prevents infinite repair loops: the audit trail is an active gate, not just a passive log
 
-**Why this matters:** Without regression detection, the system would silently generate another fix without realising it was undoing the previous one.
+**Why this matters:** Without regression blocking, the system would silently generate another fix without realising it was undoing the previous one, creating an infinite repair loop. The audit trail documents the event and the pipeline stops.
 
 **Active watches** are visible in `/api/stats` under `regression_monitor.active_fix_watches`.
 
@@ -459,12 +518,21 @@ All GitHub PR events verified with `X-Hub-Signature-256` (HMAC-SHA256) when `GIT
 
 Before any fix is returned, Agent 5 runs two quality scanners:
 
-| Gate | Tool | Checks |
-|------|------|--------|
-| **Bandit** | `run_bandit_scan()` | Python security issues (HIGH/MEDIUM severity count) |
-| **Pylint** | `run_pylint_check()` | Code quality score |
+| Gate | Tool | Checks | Consequence |
+|------|------|--------|-------------|
+| **Bandit** | `run_bandit_scan()` | Python security issues — HIGH severity | Retry with security feedback; exhausted budget → RED |
+| **Pylint** | `run_pylint_check()` | Real weighted score via `--output-format=json2` (errors + warnings, conventions/refactors excluded) | Score < 6.0 → confidence −0.20 or −0.40 |
 
-Results adjust the confidence score via `evaluate_quality()`. HIGH security issues trigger a retry with the security problem described in the prompt.
+Both gates run on every AI-generated fix before the fix is returned. Results are combined by `evaluate_quality()` into a `QualityScore` with a confidence modifier that directly shifts the traffic light verdict.
+
+**Confidence modifier rules:**
+
+| Condition | Modifier |
+|-----------|---------|
+| Bandit: ≥ 1 HIGH issue | −0.30 |
+| Pylint: score < 6.0 | −0.20 |
+| Pylint: score < 4.0 | −0.40 |
+| Both bad | stacked (up to −0.70) |
 
 ---
 
@@ -785,14 +853,13 @@ The orchestrator was originally one 1253-line `server.py`. It has been split int
 | `server.py` | `OrchestratorMCPServer` — thin shell composing the mixins below + lifecycle (pruner) |
 | `pipeline_mixin.py` | `handle_build_failure` + the Agent 3→4→5→6 pipeline split into per-step methods (`_step_clean_logs`, `_step_analyse`, `_step_fetch_context`, `_step_generate_fix`, `_step_notify`, `_finalise`) |
 | `pipeline_helpers.py` | Pure helpers — FAILED_FILE regex, ERROR_TYPE map, FILE_CONTENT extractor |
-| `github_mixin.py` | PR creation, auto-merge, GitHub webhook + HMAC signature verify |
+| `github_mixin.py` | PR creation, GitHub webhook + HMAC signature verify. Auto-merge disabled — Human-in-the-Loop enforced. |
 | `slack_mixin.py` | Slack interactive Approve / Reject button handler |
 | `workflow_api_mixin.py` | REST CRUD for workflows |
 | `admin_mixin.py` | `/api/stats`, `retry_build`, `review_code` (AI-triggered healing) |
 | `workflow.py` | `WorkflowEngine` state machine. `VALID_TRANSITIONS` graph. `prune_stale()`, `stats()` |
 | `deduplication.py` | `DeduplicationCache`. MD5 fingerprinting of error signatures. 24h cache window |
 | `rate_limiter.py` | `RateLimiter`. Sliding-window counter per IP. Thread-safe deque |
-| `traffic_light.py` | Legacy traffic light module (orchestrator-side copy) |
 | `tools.py` | MCP tool definitions for orchestrator |
 
 ### `src/llm_mcp/` — Code Repairer
@@ -802,11 +869,10 @@ The orchestrator was originally one 1253-line `server.py`. It has been split int
 | Module | Description |
 |--------|-------------|
 | `fix_generator.py` | `FixGenerator.generate_fix()` — the retry loop. Integrates log compression, fix memory, complexity scoring, secret scanner, bandit, pylint |
-| `fix_validators.py` | Static + runtime gates (AST parse, self-assignment detector, sandboxed subprocess run, sort-output sanity) |
-| `fix_prompts.py` | `build_retry_prompt()` (with stuck-loop detection), `extract_bug_list()` |
+| `fix_validators.py` | Static + runtime gates (AST parse, self-assignment detector, sandboxed subprocess run, NoneType call-site hint) |
+| `fix_prompts.py` | `build_retry_prompt()` (fingerprint-based stuck-loop detection + strategy pivot), `extract_bug_list()` |
 | `fix_parsers.py` | `apply_surgical_patch()`, `parse_response()` |
 | `prompt_templates.py` | `SYSTEM_PROMPT`, `SCENARIO_A_TEMPLATE`, `COMPLEX_REPAIR_TEMPLATE`, line-count constants |
-| `quality_check.py` | Additional quality checks for generated code |
 | `server.py` | aiohttp server for Agent 5 |
 | `tools.py` | MCP tool definitions |
 
@@ -1152,14 +1218,13 @@ auto-healing-devops-platform/
 │   │   ├── server.py             # Thin shell — composes mixins + lifecycle
 │   │   ├── pipeline_mixin.py     # handle_build_failure + 4-step pipeline
 │   │   ├── pipeline_helpers.py   # Pure helpers (regex, ERROR_TYPE map)
-│   │   ├── github_mixin.py       # PR creation, auto-merge, GitHub webhook
+│   │   ├── github_mixin.py       # PR creation, GitHub webhook (HITL — auto-merge disabled)
 │   │   ├── slack_mixin.py        # Slack Approve / Reject buttons
 │   │   ├── workflow_api_mixin.py # REST CRUD for workflows
 │   │   ├── admin_mixin.py        # /api/stats, retry, AI code review
 │   │   ├── workflow.py           # State machine + pruning
 │   │   ├── deduplication.py      # 24h error fingerprint cache
-│   │   ├── rate_limiter.py       # Sliding-window rate limiter
-│   │   └── traffic_light.py      # Legacy traffic light copy
+│   │   └── rate_limiter.py       # Sliding-window rate limiter
 │   │
 │   ├── log_cleaner_mcp/          # Port 8081 — Agent 3
 │   │   ├── pipeline.py           # 5-stage cleaning pipeline
@@ -1180,11 +1245,10 @@ auto-healing-devops-platform/
 │   │
 │   ├── llm_mcp/                  # Port 8086 — Agent 5
 │   │   ├── fix_generator.py      # FixGenerator retry loop
-│   │   ├── fix_validators.py     # Syntax + runtime gates
-│   │   ├── fix_prompts.py        # Retry prompt builder + bug list
+│   │   ├── fix_validators.py     # Syntax + runtime gates + NoneType hint
+│   │   ├── fix_prompts.py        # Retry prompt builder + stuck-loop pivot
 │   │   ├── fix_parsers.py        # Surgical patch + JSON parser
-│   │   ├── prompt_templates.py   # System + user prompts
-│   │   └── quality_check.py      # Additional code quality checks
+│   │   └── prompt_templates.py   # System + user prompts
 │   │
 │   ├── notification_mcp/         # Port 8087 — Agent 6
 │   │   ├── traffic_light_evaluator.py  # Adaptive traffic light
