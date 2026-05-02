@@ -77,7 +77,9 @@ class GitHubMixin:
         auto_merge: bool = False,
         report_data: dict | None = None,
     ) -> str:
-        """Open a PR via gerrit-mcp; auto-merge if GREEN. Returns the PR URL."""
+        """Open a PR via gerrit-mcp. Auto-merge is disabled — every PR requires
+        a human review to enforce the Human-in-the-Loop control mechanism.
+        Returns the PR URL."""
         try:
             pr_data = await _submit_patch(
                 client, build_id, repo, patch, affected_files, auto_merge,
@@ -89,8 +91,10 @@ class GitHubMixin:
                 "github_pr_created build_id=%s pr_url=%s auto_merge=%s",
                 build_id, pr_url, auto_merge,
             )
-            if auto_merge and pr_number:
-                await self._merge_pr(client, repo, pr_number)
+            # Enforce Human-in-the-Loop: every PR must be reviewed by a human
+            # before merging, regardless of the AI confidence score.
+            # if auto_merge and pr_number:
+            #     await self._merge_pr(client, repo, pr_number)
             return pr_url
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning("github_pr_failed build_id=%s error=%s", build_id, exc)

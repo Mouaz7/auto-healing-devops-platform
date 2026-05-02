@@ -103,25 +103,32 @@ def run_bandit_scan(code: str) -> BanditResult:
 def run_pylint_check(code: str) -> PylintResult:
     """Run Pylint code quality check on generated code.
 
-    Score is approximated as max(0, 10 - error_count * 2) since pylint's
-    full weighted formula requires a complete module. This is intentional —
-    we want a fast signal, not a precise score.
+    Uses --output-format=json2 (available since Pylint 3.0) to obtain the
+    real weighted score from statistics.score.  Conventions (C) and refactors
+    (R) are disabled so the score reflects errors and warnings only — docstring
+    absence should not block an AI-generated fix patch.
 
-    Returns PylintResult with ok=False if approximated score < 6.0.
+    Returns PylintResult with ok=False if score < 6.0.
     On timeout, returns ok=True with score=8.0.
     """
     def _parse(stdout: str) -> PylintResult:
         try:
-            messages = json.loads(stdout) if stdout.strip() else []
+            report = json.loads(stdout) if stdout.strip() else {}
         except json.JSONDecodeError:
-            messages = []
-        errors = sum(1 for m in messages if m.get("type") in ("error", "fatal"))
-        score = max(0.0, 10.0 - errors * 2.0)
+            report = {}
+        messages = report.get("messages", [])
+        raw_score = report.get("statistics", {}).get("score")
+        if raw_score is not None:
+            score = round(float(raw_score), 2)
+        else:
+            # Fallback if statistics block is absent
+            errors = sum(1 for m in messages if m.get("type") in ("error", "fatal"))
+            score = max(0.0, 10.0 - errors * 2.0)
         return PylintResult(ok=score >= 6.0, score=score, messages=messages)
 
     result = _run_scan(
         code,
-        cmd_builder=lambda p: ["pylint", "--output-format=json", p],
+        cmd_builder=lambda p: ["pylint", "--output-format=json2", "--disable=C,R", p],
         parser=_parse,
     )
     if result is None:

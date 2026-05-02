@@ -66,16 +66,16 @@ def greet(name):
         assert result.score >= 6.0
 
     def test_undefined_variable_has_error(self):
-        """Code with undefined variables has 1 error (score = 10 - 2 = 8)."""
+        """Code with undefined variables scores below 6.0 (real Pylint formula)."""
         code = """
 def broken():
     return undefined_var
 """
         result = run_pylint_check(code)
-        # 1 error → score = 10 - 1*2 = 8.0, which is ok=True
-        assert result.score == 8.0
-        assert result.ok is True
-        # But it has an error in the messages
+        # Pylint penalises errors with weight 5: score = 10 - (5*errors/statements)*10
+        # Result is well below 6.0 → ok=False
+        assert result.score < 6.0
+        assert result.ok is False
         error_types = [m["type"] for m in result.messages]
         assert "error" in error_types
 

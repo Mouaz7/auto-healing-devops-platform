@@ -197,7 +197,13 @@ class PipelineMixin:
 
         cleaned  = await self._step_clean_logs(client, build_id, raw_log, headers)
         analysis = await self._step_analyse(client, build_id, raw_log, cleaned, headers)
-        self._check_regression(build_id, analysis)
+        if self._check_regression(build_id, analysis):
+            return self._blocked_result(
+                build_id,
+                "regression_loop",
+                "Regression detected — the same file was recently fixed and failed again. "
+                "Blocking to prevent an infinite repair loop. Manual review required.",
+            )
         code_context = await self._step_fetch_context(client, repo, analysis, raw_log)
         fix = await self._step_generate_fix(
             client, build_id, analysis, cleaned, code_context, headers,
@@ -283,11 +289,15 @@ class PipelineMixin:
                 )
         return analysis
 
-    def _check_regression(self, build_id: str, analysis: dict) -> None:
-        """Emit a regression alert if the failing files were recently fixed."""
+    def _check_regression(self, build_id: str, analysis: dict) -> bool:
+        """Return True and log audit event if the failing files were recently fixed.
+
+        A True return means the pipeline detected a regression loop and the
+        caller must stop further processing to prevent an infinite repair cycle.
+        """
         regression = heal_verifier.check_regression(build_id, analysis["affected_files"])
         if not regression:
-            return
+            return False
         audit.log(
             "regression_detected",
             build_id=build_id,
@@ -296,10 +306,11 @@ class PipelineMixin:
             age_minutes=regression["age_minutes"],
         )
         logger.warning(
-            "regression_alert build_id=%s original=%s files=%s age_min=%.1f",
+            "regression_loop_blocked build_id=%s original=%s files=%s age_min=%.1f",
             build_id, regression["original_build_id"],
             regression["overlap_files"], regression["age_minutes"],
         )
+        return True
 
     async def _step_fetch_context(
         self, client, repo: str, analysis: dict, raw_log: str,
