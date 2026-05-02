@@ -33,6 +33,9 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "structlog>=24.1.0",
     "tiktoken>=0.7.0",
+    # Quality gates — run on every AI-generated fix before it is committed
+    "pylint>=3.1.0",
+    "bandit>=1.7.8",
 ]
 
 [project.optional-dependencies]
@@ -41,8 +44,6 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=5.0.0",
     "pytest-mock>=3.14.0",
-    "pylint>=3.1.0",
-    "bandit>=1.7.8",
     "black>=24.3.0",
     "isort>=5.13.0",
     "mypy>=1.9.0",
