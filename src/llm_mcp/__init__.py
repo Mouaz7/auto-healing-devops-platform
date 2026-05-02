@@ -6,7 +6,6 @@
 #   fix_validators.py   — syntax + runtime checks (AST, subprocess sandbox)
 #   fix_prompts.py      — retry-prompt builder, bug-list extractor
 #   fix_parsers.py      — surgical patch + JSON response parser
-#   quality_check.py    — Bandit + Pylint run before fix is submitted
 #   server.py           — LLMMCPServer
 #   tools.py            — MCP tool definitions
 #
