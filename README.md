@@ -8,7 +8,6 @@
 [![HITL](https://img.shields.io/badge/HITL-enforced-critical?style=flat-square)](src/orchestrator_mcp/pipeline_mixin.py)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square)](https://python.org)
 [![License](https://img.shields.io/badge/thesis-PA2534%20BTH%202026-lightgrey?style=flat-square)](https://www.bth.se)
-[![Built with Claude Code](https://img.shields.io/badge/Built%20with-Claude%20Code-orange?style=flat-square&logo=anthropic)](https://claude.ai/code)
 
 **Bachelor Thesis · Blekinge Tekniska Högskola (BTH) · 2026**
 
