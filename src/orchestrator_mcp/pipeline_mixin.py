@@ -22,6 +22,7 @@ from src.shared.heal_verifier import heal_verifier
 from src.shared.models import WorkflowState, WorkflowStatus
 from src.shared.resilience import handle_agent_failure, trigger_global_fallback
 from src.notification_mcp.slack_notifier import (
+    send_slack_notification,
     send_slack_pipeline_started,
     send_slack_review_buttons,
 )
@@ -198,6 +199,15 @@ class PipelineMixin:
         cleaned  = await self._step_clean_logs(client, build_id, raw_log, headers)
         analysis = await self._step_analyse(client, build_id, raw_log, cleaned, headers)
         if self._check_regression(build_id, analysis):
+            elapsed_s = round(time.monotonic() - started_at)
+            self.engine.advance(build_id, WorkflowStatus.BLOCKED)
+            files_str = ", ".join(analysis.get("affected_files", []))
+            asyncio.create_task(send_slack_notification(
+                "RED", build_id, 0.0,
+                "Regression loop detected — this file was recently fixed and failed again. "
+                "Automatic repair blocked. Manual intervention required.",
+                files_str, elapsed_s=elapsed_s,
+            ))
             return self._blocked_result(
                 build_id,
                 "regression_loop",
@@ -209,6 +219,14 @@ class PipelineMixin:
             client, build_id, analysis, cleaned, code_context, headers,
         )
         if fix is None:  # 422 — structurally unrecoverable
+            elapsed_s = round(time.monotonic() - started_at)
+            files_str = ", ".join(analysis.get("affected_files", []))
+            asyncio.create_task(send_slack_notification(
+                "RED", build_id, 0.0,
+                "Fix generation rejected (422) — change is too complex or structurally "
+                "unrecoverable. Manual intervention required.",
+                files_str, elapsed_s=elapsed_s,
+            ))
             return self._blocked_result(build_id, "fix_rejected", "Fix generation rejected")
 
         elapsed_s = round(time.monotonic() - started_at)
@@ -437,13 +455,10 @@ class PipelineMixin:
             "explanation": fix.get("explanation", ""),
         }
 
-        if False:  # HITL Enforced: Auto-merge path disabled — every fix requires human review
-            pass
-        elif colour in ("GREEN", "YELLOW"):
-            # Both GREEN and YELLOW go through human review (Human-in-the-Loop).
-            # GREEN gets Approve/Reject buttons just like YELLOW — the confidence
-            # score is shown so the reviewer can make an informed decision, but the
-            # system never merges autonomously regardless of score.
+        if colour in ("GREEN", "YELLOW"):
+            # Human-in-the-Loop: both GREEN and YELLOW require explicit human
+            # approval before merging. The colour signals review urgency, not
+            # autonomous action — GREEN = fast-track review, YELLOW = careful review.
             self.engine.advance(build_id, WorkflowStatus.AWAITING_REVIEW)
             if repo:
                 pr_data = await self._create_github_pr_with_number(

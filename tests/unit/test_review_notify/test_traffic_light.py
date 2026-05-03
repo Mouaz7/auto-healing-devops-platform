@@ -11,7 +11,8 @@ class TestTrafficLightThresholds:
         # score = 0.95*0.6 + 1.0*0.4 = 0.57+0.4 = 0.97 → GREEN
         result = evaluate_traffic_light(good_fix, low_analysis)
         assert result.colour == TrafficLightColour.GREEN
-        assert result.auto_merge_allowed is True
+        # HITL policy: auto-merge is never allowed — human approval always required
+        assert result.auto_merge_allowed is False
 
     def test_yellow_medium_confidence(self, weak_fix, low_analysis):
         # score = 0.45*0.6 + 1.0*0.4 = 0.27+0.4 = 0.67 → YELLOW

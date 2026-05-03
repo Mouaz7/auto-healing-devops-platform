@@ -3,17 +3,27 @@
 Score formula:
     final_score = (llm_confidence × 0.6) + (blast_radius_score × 0.4)
 
+    blast_radius_score: LOW=1.0, MEDIUM=0.6, HIGH=0.2
+
 Traffic light thresholds (adaptive — self-calibrate per error type):
-    GREEN  ≥ adaptive_green   → auto-merge allowed   (default 0.85)
-    YELLOW ≥ adaptive_yellow  → human review required (default 0.60)
-    RED    < adaptive_yellow  → fix blocked
+    GREEN  ≥ adaptive_green   (default 0.85) — high confidence, fast-track review
+    YELLOW ≥ adaptive_yellow  (default 0.60) — medium confidence, careful review
+    RED    < adaptive_yellow                  — low confidence, fix blocked
+
+Human-in-the-Loop (HITL) policy:
+    ALL fixes — including GREEN — require explicit human approval before merging.
+    The traffic light colour signals how much scrutiny the reviewer should apply,
+    not whether the system is allowed to merge automatically. auto_merge_allowed
+    always returns False to reflect this policy.
 
 Safety override:
     HIGH blast radius ALWAYS forces RED, regardless of confidence.
+    The risk of a wide-impact change outweighs any confidence score.
 
-The system learns from human approve/reject decisions via AdaptiveThresholds.
-For example, if humans consistently approve ASSERTION_ERROR fixes at 0.70,
-the GREEN threshold for that type is lowered to ~0.70 automatically.
+Adaptive thresholds:
+    The system records each human approve/reject decision and shifts the
+    per-error-type thresholds toward what humans actually accept (±safety margin).
+    After ≥5 decisions the thresholds self-calibrate automatically.
 """
 from __future__ import annotations
 
@@ -71,16 +81,25 @@ def evaluate_traffic_light(
 
     if final_score >= green_t:
         colour     = TrafficLightColour.GREEN
-        auto_merge = True
-        reason     = f"High confidence — auto-merge allowed (threshold {green_t:.0%})"
+        auto_merge = False   # HITL: human approval always required
+        reason     = (
+            f"High confidence — fix proposed for review "
+            f"(score {final_score:.0%}, threshold {green_t:.0%})"
+        )
     elif final_score >= yellow_t:
         colour     = TrafficLightColour.YELLOW
         auto_merge = False
-        reason     = f"Medium confidence — human review required (threshold {yellow_t:.0%})"
+        reason     = (
+            f"Medium confidence — careful human review required "
+            f"(score {final_score:.0%}, threshold {yellow_t:.0%})"
+        )
     else:
         colour     = TrafficLightColour.RED
         auto_merge = False
-        reason     = f"Low confidence — fix blocked (threshold {yellow_t:.0%})"
+        reason     = (
+            f"Low confidence — fix blocked "
+            f"(score {final_score:.0%} below {yellow_t:.0%} threshold)"
+        )
 
     confidence_score.labels(traffic_light=colour.value).observe(final_score)
     workflows_total.labels(status=colour.value).inc()

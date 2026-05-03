@@ -30,7 +30,7 @@ class TestBoundaryValues:
         result = evaluate_traffic_light(fix, analysis)
         assert result.final_score == pytest.approx(0.85, rel=1e-4)
         assert result.colour.value == "GREEN"
-        assert result.auto_merge_allowed is True
+        assert result.auto_merge_allowed is False  # HITL: human approval always required
 
     def test_yellow_at_exactly_060(self):
         """final_score = 0.60 exactly → YELLOW (not RED)."""
@@ -121,7 +121,7 @@ class TestZeroAndMaxConfidence:
         result = evaluate_traffic_light(fix, analysis)
         assert result.final_score == pytest.approx(1.0, rel=1e-4)
         assert result.colour.value == "GREEN"
-        assert result.auto_merge_allowed is True
+        assert result.auto_merge_allowed is False  # HITL: human approval always required
 
     def test_medium_blast_reduces_score(self):
         """MEDIUM blast (score=0.6) reduces final_score vs LOW blast."""
