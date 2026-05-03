@@ -5,6 +5,7 @@
 ### Automated Remediation in CI/CD: Design and Control of an AI-based Code Repair Agent
 
 [![Tests](https://img.shields.io/badge/tests-494%20passing-brightgreen?style=flat-square)](tests/)
+[![HITL](https://img.shields.io/badge/HITL-enforced-critical?style=flat-square)](src/orchestrator_mcp/pipeline_mixin.py)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square)](https://python.org)
 [![License](https://img.shields.io/badge/thesis-PA2534%20BTH%202026-lightgrey?style=flat-square)](https://www.bth.se)
 [![Built with Claude Code](https://img.shields.io/badge/Built%20with-Claude%20Code-orange?style=flat-square&logo=anthropic)](https://claude.ai/code)
@@ -66,12 +67,14 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 
 | Control Mechanism | What it does | Code Location |
 |---|---|---|
-| **Human-in-the-Loop (enforced)** | Auto-merge is **disabled**. Every PR requires a human to merge, regardless of confidence score. | `src/orchestrator_mcp/github_mixin.py:94` |
+| **Human-in-the-Loop (enforced)** | Auto-merge permanently **disabled** for all confidence levels. GREEN = fast-track review, YELLOW = careful review. Both send Slack Approve/Reject buttons. | `src/orchestrator_mcp/github_mixin.py:94` |
+| **Transparent confidence score** | Every Slack notification shows the exact score and threshold: "High confidence — fix proposed for review (score 97%, threshold 85%)". | `src/notification_mcp/traffic_light_evaluator.py` |
+| **BLOCKED-state notification** | Regression loops and 422-rejected fixes send Slack RED alert immediately — no silent failures. | `src/orchestrator_mcp/pipeline_mixin.py:200` |
 | **Bandit security scan** | Scans every generated fix for HIGH-severity issues. Triggers LLM retry with feedback. | `src/shared/quality_gates.py` |
-| **Pylint linting (real score)** | Real weighted score via `--output-format=json2`. Low score reduces confidence. | `src/shared/quality_gates.py` |
+| **Pylint linting (real score)** | Real weighted score via `--output-format=json2`. Low score reduces confidence modifier (−0.20 or −0.40). | `src/shared/quality_gates.py` |
 | **Secret scanner** | 11 regex patterns block hardcoded credentials before any GitHub push. | `src/shared/secret_scanner.py` |
 | **Audit trail** | Append-only JSONL log — every pipeline event with UTC timestamp. | `src/shared/audit_log.py` |
-| **Regression loop prevention** | Same files fail again after recent fix → pipeline returns BLOCKED immediately. | `src/orchestrator_mcp/pipeline_mixin.py:200` |
+| **Regression loop prevention** | Same files fail again after recent fix → workflow → BLOCKED + Slack RED. | `src/orchestrator_mcp/pipeline_mixin.py` |
 | **Retry limits** | Max 6–14 attempts by bug complexity. `FixStillBrokenError` on exhaustion. | `src/llm_mcp/fix_generator.py:254` |
 | **CI loop guard** | `!startsWith(commit.message, 'auto-heal')` — healer commits never re-trigger the healer. | `.github/workflows/auto-heal.yml` |
 | **Protected paths** | AI cannot modify `.github/`, `Dockerfile`, `pyproject.toml`, or infra files. | `src/gerrit_mcp/gerrit_helpers.py:is_protected_path` |
@@ -87,7 +90,7 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 | AI cannot be trusted to merge | **Auto-merge disabled** — human clicks Merge on GitHub | `src/orchestrator_mcp/github_mixin.py` |
 | No accountability or traceability | Audit trail + PR body with confidence, root cause, elapsed time | `src/shared/audit_log.py` |
 | System loops infinitely | Regression block + CI guard prevent infinite repair cycles | `src/orchestrator_mcp/pipeline_mixin.py` |
-| Confidence score is opaque | Traffic light (🟢🟡🔴) + numeric score in every Slack notification | `src/notification_mcp/traffic_light_evaluator.py` |
+| Confidence score is opaque | Exact score + threshold shown in every notification: "fix proposed for review (score 97%, threshold 85%)". `auto_merge_allowed` always `False`. | `src/notification_mcp/traffic_light_evaluator.py` |
 | Thresholds don't fit the domain | Adaptive thresholds self-calibrate from human approve/reject decisions | `src/shared/adaptive_thresholds.py` |
 
 ---
@@ -175,13 +178,21 @@ POST /tools/handle_build_failure
      • Adaptive traffic light: confidence × 0.6 + blast_score × 0.4
      • HIGH blast radius always forces 🔴 RED
   │
-  ├─── 🟢 GREEN  ──► PR opened · Slack notification · human merges on GitHub
+  ├─── 🟢 GREEN  ──► PR opened · Slack Approve / Reject buttons (fast-track)
+  │                  Score shown: "High confidence — fix proposed for review (97%)"
   │                  Regression watch activated (60 min)
   │
-  ├─── 🟡 YELLOW ──► PR opened · Slack Approve / Reject buttons
+  ├─── 🟡 YELLOW ──► PR opened · Slack Approve / Reject buttons (careful review)
+  │                  Score shown: "Medium confidence — careful review required (72%)"
   │                  Human decision feeds adaptive thresholds + fix memory
   │
-  └─── 🔴 RED   ──► No PR · BLOCKED · manual intervention required
+  ├─── 🔴 RED    ──► No PR · BLOCKED · Slack RED alert sent immediately
+  │                  Score shown: "Low confidence — fix blocked (45% below 60%)"
+  │                  Manual intervention required
+  │
+  └─── ⛔ BLOCKED ─► Regression loop OR 422 too-complex
+                     Slack RED alert with reason · BLOCKED state in workflow
+                     Audit event logged · no fix attempted
 ```
 
 ---
@@ -190,16 +201,25 @@ POST /tools/handle_build_failure
 
 ### 🔒 Human-in-the-Loop — Always Enforced
 
-Auto-merge is **permanently disabled**. The relevant code in `github_mixin.py`:
+Auto-merge is **permanently disabled** for all confidence levels. Every fix — even a GREEN fix at 99% confidence — requires explicit human approval before merging. The colour signals review urgency, not autonomous action:
+
+| Colour | What it means for the reviewer |
+|---|---|
+| 🟢 GREEN | High confidence — **fast-track review** recommended. Check the diff briefly and merge if it looks right. |
+| 🟡 YELLOW | Medium confidence — **careful review** required. Read the fix closely and consider testing locally. |
+| 🔴 RED | Low confidence or HIGH blast radius — **fix is blocked**, no PR created. Manual intervention required. |
+
+The auto-merge code path is disabled at the source:
 
 ```python
+# src/orchestrator_mcp/github_mixin.py
 # Enforce Human-in-the-Loop: every PR must be reviewed by a human
 # before merging, regardless of the AI confidence score.
 # if auto_merge and pr_number:
 #     await self._merge_pr(client, repo, pr_number)
 ```
 
-The AI generates and opens the PR. A human decides whether to merge it — via Slack buttons (YELLOW) or directly on GitHub (GREEN).
+`auto_merge_allowed` in `TrafficLightResult` always returns `False` — it is never consulted for merge decisions.
 
 ---
 
@@ -252,7 +272,7 @@ Example record:
 
 Three complementary mechanisms:
 
-1. **Regression blocking** — `_check_regression()` returns `True` if the failing files were fixed within the last 60 minutes → pipeline immediately returns `BLOCKED/RED`, no new fix generated
+1. **Regression blocking** — `_check_regression()` returns `True` if the failing files were fixed within the last 60 minutes → workflow advances to `BLOCKED`, Slack RED alert sent immediately with the reason, no new fix generated
 2. **CI guard** — GitHub Actions trigger steps require `!startsWith(head_commit.message, 'auto-heal')`, so healer commits never re-trigger the healer
 3. **Protected paths** — AI cannot modify `.github/`, `Dockerfile`, `pyproject.toml`, `requirements.txt`, or any infra file
 
@@ -273,11 +293,14 @@ Blast radius scores:
 
 ### Thresholds (adaptive per error type)
 
-| Colour | Default | Action |
-|---|---|---|
-| 🟢 **GREEN** | ≥ 0.85 | PR opened · human merges on GitHub · regression watch started |
-| 🟡 **YELLOW** | 0.60 – 0.84 | PR opened · Slack Approve/Reject buttons · 24 h review window |
-| 🔴 **RED** | < 0.60 | No PR · build blocked · manual intervention required |
+| Colour | Score | Reason text sent to Slack | Action |
+|---|---|---|---|
+| 🟢 **GREEN** | ≥ 0.85 | "High confidence — fix proposed for review (score X%, threshold 85%)" | PR opened · Slack Approve/Reject buttons (fast-track) · regression watch started |
+| 🟡 **YELLOW** | 0.60–0.84 | "Medium confidence — careful human review required (score X%, threshold 60%)" | PR opened · Slack Approve/Reject buttons · 24 h review window |
+| 🔴 **RED** | < 0.60 | "Low confidence — fix blocked (score X% below 60% threshold)" | No PR · Slack RED alert · workflow BLOCKED · manual intervention required |
+| 🔴 **RED** (safety) | any | "Safety override: HIGH blast radius forces RED (score X%)" | No PR · Slack RED alert · workflow BLOCKED |
+
+`auto_merge_allowed` is always `False` — the traffic light colour signals review urgency, not a merge decision.
 
 Thresholds are **not fixed** — they self-calibrate per error type. After 5+ human decisions, `new_GREEN = mean(approved_confidences) − 0.03`. Stored in append-only JSONL, cached in memory.
 
@@ -287,15 +310,18 @@ Thresholds are **not fixed** — they self-calibrate per error type. After 5+ hu
 
 ```
 PENDING
-  └─► ANALYSING
-        └─► GENERATING_FIX
-              └─► VALIDATING
-                    ├─► AWAITING_REVIEW ──► APPLYING_FIX ──► COMPLETED
-                    │         └─────────────────────────────► BLOCKED
-                    ├─► APPLYING_FIX ──────────────────────► COMPLETED
-                    └─► BLOCKED
+  └─► ANALYSING ──────────────────────────────────────────► BLOCKED ⛔
+        │               (regression detected)                + Slack RED
+        └─► GENERATING_FIX ──────────────────────────────► BLOCKED ⛔
+                  │              (422 too complex)            + Slack RED
+                  └─► VALIDATING
+                        ├─► AWAITING_REVIEW ──► APPLYING_FIX ──► COMPLETED ✅
+                        │   (HITL review)  └─────────────────► BLOCKED ⛔
+                        └─► BLOCKED ⛔
+                             (RED traffic light / safety override)
+                             + Slack RED
 
-Any state ──► FAILED  (on agent crash)
+Any state ──► FAILED  (on unhandled agent exception)
 ```
 
 - `AWAITING_REVIEW` older than **24 h** → auto-blocked (review window expired)
@@ -426,14 +452,30 @@ Independent breaker per service: NIM API, GitHub API, Slack, Teams.
 
 ## 11. Slack Integration
 
-### YELLOW Path — Interactive Review Buttons
+### GREEN & YELLOW — Interactive Review Buttons (HITL Enforced)
 
+Both GREEN and YELLOW fixes send Slack Approve/Reject buttons. The difference is review urgency, not process:
+
+**GREEN (fast-track):**
+```
+✅ Auto-fix Proposed (Review Required)
+Build: build-12345  |  Confidence: 97%  |  Blast radius: LOW
+High confidence — fix proposed for review (score 97%, threshold 85%)
+Files: src/utils.py
+Duration: 42s
+
+PR: [View on GitHub →]
+
+[✅ Approve & Merge]    [❌ Reject]
+```
+
+**YELLOW (careful review):**
 ```
 🟡 Human Review Required
 Build: build-12345  |  Confidence: 74%  |  Blast radius: LOW
-
-What the AI did:
-  Fixed incorrect import path in src/utils.py
+Medium confidence — careful human review required (score 74%, threshold 60%)
+Files: src/utils.py
+Duration: 58s
 
 PR: [View on GitHub →]
 
@@ -441,6 +483,18 @@ PR: [View on GitHub →]
 ```
 
 Human clicks feed back to `fix_memory` and `adaptive_thresholds`.
+
+### RED & BLOCKED — Immediate Alert
+
+```
+🔴 Fix Blocked
+Build: build-12345
+Low confidence — fix blocked (score 45% below 60% threshold)
+Files: src/complex_module.py
+Duration: 120s  |  Manual intervention required.
+```
+
+This also fires for regression loops ("Regression loop detected — same file fixed recently") and 422-rejected fixes ("Fix generation rejected — too complex").
 
 ### `/autoheal` Slash Commands (9 commands)
 
