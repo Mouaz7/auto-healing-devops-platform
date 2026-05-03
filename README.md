@@ -11,7 +11,7 @@
 
 **Bachelor Thesis · Blekinge Tekniska Högskola (BTH) · 2026**
 
-*Ahmad Darwich · Mouaz Naji · Supervisor: Ahmad Nauman Ghazi*
+*Mouaz Naji · Supervisor: Ahmad Nauman Ghazi*
 
 </div>
 
@@ -759,7 +759,6 @@ auto-healing-devops-platform/
 
 | Name | Email | Program |
 |---|---|---|
-| Ahmad Darwich | ahda23@student.bth.se | Software Engineering |
 | Mouaz Naji | moap23@student.bth.se | Software Engineering |
 
 **Supervisor:** Ahmad Nauman Ghazi — nauman.ghazi@bth.se  
