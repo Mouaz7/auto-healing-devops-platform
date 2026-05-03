@@ -17,7 +17,7 @@ _SLACK_TEMPLATES: dict[str, dict] = {
     "GREEN": {
         "blocks": [
             {"type": "header",
-             "text": {"type": "plain_text", "text": "✅ Auto-fix Applied"}},
+             "text": {"type": "plain_text", "text": "✅ Auto-fix Proposed (Review Required)"}},
             {"type": "section",
              "text": {"type": "mrkdwn",
                       "text": "*Build:* __BUILD_ID__\n*Confidence:* __SCORE_PCT__%\n"

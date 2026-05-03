@@ -437,16 +437,13 @@ class PipelineMixin:
             "explanation": fix.get("explanation", ""),
         }
 
-        if colour == "GREEN" and verdict.get("auto_merge_allowed"):
-            if repo:
-                pr_url = await self._create_github_pr(
-                    client, build_id, repo, fix["fix_patch"],
-                    files_for_pr, auto_merge=True, report_data=report_data,
-                )
-            self.engine.advance(build_id, WorkflowStatus.APPLYING_FIX)
-            self.engine.advance(build_id, WorkflowStatus.COMPLETED)
-            heal_verifier.record_fix(build_id, files_for_pr)
-        elif colour == "YELLOW":
+        if False:  # HITL Enforced: Auto-merge path disabled — every fix requires human review
+            pass
+        elif colour in ("GREEN", "YELLOW"):
+            # Both GREEN and YELLOW go through human review (Human-in-the-Loop).
+            # GREEN gets Approve/Reject buttons just like YELLOW — the confidence
+            # score is shown so the reviewer can make an informed decision, but the
+            # system never merges autonomously regardless of score.
             self.engine.advance(build_id, WorkflowStatus.AWAITING_REVIEW)
             if repo:
                 pr_data = await self._create_github_pr_with_number(
@@ -462,6 +459,7 @@ class PipelineMixin:
                     score=fix["confidence"],
                     explanation=fix.get("explanation", ""),
                 )
+            heal_verifier.record_fix(build_id, files_for_pr)
         else:
             self.engine.advance(build_id, WorkflowStatus.BLOCKED)
 
