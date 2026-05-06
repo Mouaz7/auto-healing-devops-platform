@@ -112,6 +112,34 @@ def detect_self_assignments(code: str) -> list[str]:
     return [m.group(1) for m in _SELF_ASSIGN_RE.finditer(code)]
 
 
+_IS_LITERAL_RE = re.compile(
+    # Only flag `is` with numeric or string literals — NOT None/True/False,
+    # which are singletons where `is` is the correct Python idiom.
+    r"\bif\b[^:]*\bis\b\s+(?:-?\d+|\"[^\"]*\"|\'[^\']*\')\b"
+    r"|\bif\b[^:]*(?:-?\d+|\"[^\"]*\"|\'[^\']*\')\s+\bis\b",
+    re.MULTILINE,
+)
+
+_INT_DIV_FLOAT_RE = re.compile(r"\b(\w+)\s*//\s*(\w+)\b")
+
+
+def detect_identity_comparisons(code: str) -> list[str]:
+    """Find `if x is 5` / `if x is "str"` — should use == for value equality."""
+    return [m.group(0).strip() for m in _IS_LITERAL_RE.finditer(code)]
+
+
+def detect_integer_division(code: str, context: str = "") -> list[str]:
+    """Find `a // b` in float-context (e.g. average computations).
+
+    Only flags when the surrounding context suggests a float result is expected
+    (e.g. the function is named 'average', 'mean', 'ratio', 'percent').
+    """
+    float_context_words = {"average", "mean", "ratio", "percent", "rate", "fraction"}
+    if not any(w in context.lower() or w in code.lower() for w in float_context_words):
+        return []
+    return [m.group(0) for m in _INT_DIV_FLOAT_RE.finditer(code)]
+
+
 def check_sort_output(stdout: str) -> str:
     """If the program advertises sorted output, verify it is actually sorted.
 
@@ -164,6 +192,24 @@ def validate_fix_runtime(fix_code: str, timeout_s: int = 5) -> tuple[bool, str]:
         return False, (
             f"SELF-ASSIGNMENT DETECTED: '{self_assigns[0]} = {self_assigns[0]}' is a no-op "
             "and always a bug. Remove it and replace with the correct logic."
+        )
+
+    identity_cmps = detect_identity_comparisons(fix_code)
+    if identity_cmps:
+        return False, (
+            f"IDENTITY COMPARISON BUG: `{identity_cmps[0]}` uses `is` to compare a value. "
+            "`is` checks object identity (same memory address), not equality. "
+            "Use `==` for value comparison. "
+            "Example: `if x is 0` should be `if x == 0`."
+        )
+
+    int_divs = detect_integer_division(fix_code)
+    if int_divs:
+        return False, (
+            f"INTEGER DIVISION IN FLOAT CONTEXT: `{int_divs[0]}` uses `//` (floor division) "
+            "but this function computes a float result (average/mean/ratio). "
+            "Use `/` for true division. "
+            "Example: `total // len(nums)` returns 2 for [1,2,3] instead of 2.0."
         )
 
     tmp_path = ""
@@ -273,6 +319,85 @@ def validate_fix_runtime(fix_code: str, timeout_s: int = 5) -> tuple[bool, str]:
                     "  3. For percentages: `return (a / b * 100) if b else 0`\n"
                     "Find every `/` and `//` operator and check if the denominator "
                     "can be zero when the input is empty or all-zero."
+                )
+            if "UnboundLocalError" in err:
+                unbound_m = re.search(
+                    r"local variable '([^']+)' referenced before assignment", err
+                )
+                var = unbound_m.group(1) if unbound_m else ""
+                err += (
+                    "\n\n*** PYTHON SCOPING HINT ***\n"
+                    + (f"Variable '{var}' is treated as LOCAL because it is assigned\n"
+                       "somewhere in the function body — Python makes it local EVERYWHERE,\n"
+                       "even before the line where the assignment appears.\n"
+                       if var else "")
+                    + "Fixes:\n"
+                    "  1. Initialise before the branch: `result = default` at top of function\n"
+                    "  2. Ensure EVERY if/else branch assigns the variable\n"
+                    "  3. Use `global x` or `nonlocal x` only if you truly want the outer var\n"
+                    + (f"Search for every `{var} =` and `{var}` read and ensure the write\n"
+                       "always happens before the read on any execution path."
+                       if var else "")
+                )
+            if "dictionary changed size during iteration" in err \
+                    or "Set changed size during iteration" in err:
+                err += (
+                    "\n\n*** MUTATION DURING ITERATION HINT ***\n"
+                    "You added or removed items from a dict/set while looping over it.\n"
+                    "Python forbids this — the internal structure becomes inconsistent.\n"
+                    "Fixes:\n"
+                    "  1. Snapshot keys first: `for k in list(d.keys()):`\n"
+                    "  2. Snapshot items: `for k, v in list(d.items()):`\n"
+                    "  3. Build a new collection: `{k: v for k,v in d.items() if cond}`\n"
+                    "Find the loop that calls `del d[k]`, `d[k] = v`, or `d.pop(k)` "
+                    "on the container it is currently iterating over."
+                )
+            if "is not iterable" in err and "TypeError" in err:
+                err += (
+                    "\n\n*** NOT ITERABLE HINT ***\n"
+                    "TypeError: object is not iterable almost always means a function "
+                    "returned None when the caller expected a list or generator.\n"
+                    "  1. Check every `return` path of the function being iterated\n"
+                    "  2. A function with no explicit `return` returns None implicitly\n"
+                    "  3. `for x in func()` silently breaks if func() returns None —\n"
+                    "     the fix is usually adding `return result` at the end of func\n"
+                    "  4. Generators: calling `gen` (no parentheses) gives the function\n"
+                    "     object, not the generator — ensure you call `gen()`\n"
+                    "Trace what value flows into the `for` loop or unpacking expression."
+                )
+            if "too many values to unpack" in err or "not enough values to unpack" in err:
+                err += (
+                    "\n\n*** UNPACKING MISMATCH HINT ***\n"
+                    "The number of variables on the left does not match the number of\n"
+                    "values on the right.\n"
+                    "  1. `a, b = func()` fails if func() returns 3 values — add a var\n"
+                    "  2. `a, b, c = func()` fails if func() returns a tuple of 2\n"
+                    "  3. For variable-length: use `a, *rest = seq` (starred assignment)\n"
+                    "  4. Check if a function returns `(x,)` (1-tuple) vs `(x, y)` (2-tuple)\n"
+                    "Print `print(repr(func()))` to see exactly what is returned."
+                )
+            if "OverflowError" in err:
+                err += (
+                    "\n\n*** OVERFLOW / EXPONENTIAL COMPLEXITY HINT ***\n"
+                    "OverflowError means a number grew beyond representable limits,\n"
+                    "usually caused by exponential-time recursion without memoization.\n"
+                    "  1. Add a memo dict to cache already-computed subproblems:\n"
+                    "     `if n in memo: return memo[n]`\n"
+                    "  2. Or use `@functools.lru_cache(maxsize=None)` on the function\n"
+                    "  3. For factorial/power: check that the base case stops the chain\n"
+                    "     and intermediate values do not grow unboundedly\n"
+                    "Identify the recursive call and add memoization before it."
+                )
+            if "StopIteration" in err:
+                err += (
+                    "\n\n*** EXHAUSTED ITERATOR HINT ***\n"
+                    "StopIteration outside a for-loop means you called next() on an\n"
+                    "iterator that has no more elements.\n"
+                    "  1. Use `next(it, default)` to provide a fallback value\n"
+                    "  2. Check if the iterator was already consumed in an earlier loop\n"
+                    "  3. Generators can only be iterated ONCE — re-create for each pass\n"
+                    "  4. `iter([])` is immediately exhausted — ensure the list is not empty\n"
+                    "Find every `next()` call and verify the iterator still has elements."
                 )
             return False, f"RuntimeError: {err}"
 

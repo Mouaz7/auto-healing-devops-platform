@@ -36,13 +36,36 @@ def build_retry_prompt(original_prompt: str, failed_attempts: list[dict]) -> str
     line.
     """
     stuck = False
+    hard_stuck = False
     if len(failed_attempts) >= 2:
         last_fp = _error_fingerprint(failed_attempts[-1]["err"])
         prev_fp = _error_fingerprint(failed_attempts[-2]["err"])
         stuck = last_fp == prev_fp
+    if len(failed_attempts) >= 3:
+        fps = [_error_fingerprint(a["err"]) for a in failed_attempts[-3:]]
+        hard_stuck = len(set(fps)) == 1   # all three identical
 
     parts = [original_prompt, "", "=" * 60, "PRIOR FAILED ATTEMPTS", "=" * 60]
-    if stuck:
+    if hard_stuck:
+        parts.extend([
+            "",
+            "!!! EMERGENCY: FULL FILE REWRITE REQUIRED !!!",
+            "Three consecutive attempts produced the IDENTICAL error.",
+            "Your line-by-line edits are not working. The fix is wrong at a",
+            "deeper level than the traceback shows.",
+            "",
+            "MANDATORY APPROACH FOR THIS ATTEMPT:",
+            "  1. IGNORE the traceback line completely.",
+            "  2. Re-read the ENTIRE file from line 1.",
+            "  3. Write out the COMPLETE corrected file in fix_code — every",
+            "     single line, top to bottom, with all bugs fixed.",
+            "  4. Verify mentally: run the program with each test case and",
+            "     confirm the expected output before submitting.",
+            "",
+            "DO NOT use changed_lines. Return the whole file.",
+            "",
+        ])
+    elif stuck:
         last_err  = failed_attempts[-1]["err"]
         last_kind = failed_attempts[-1].get("kind", "")
         if "SyntaxError" in last_err or last_kind == "syntax":

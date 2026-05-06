@@ -185,7 +185,7 @@ class TestValidateFixRuntimeHint:
             "    while low <= high:\n"
             "        mid = (low + high) // 2\n"
             "        if arr[mid] == target: return mid\n"
-            "        elif arr[mid] < target: low = mid\n"   # never advances
+            "        elif arr[mid] < target: low = mid\n"
             "        else: high = mid\n"
             "    return -1\n"
             "search([1,2,3,4,5], 5)\n"
@@ -195,6 +195,86 @@ class TestValidateFixRuntimeHint:
         assert "INFINITE LOOP" in err
         assert "INFINITE LOOP HINT" in err
         assert "mid + 1" in err
+
+    def test_unbound_local_error_appends_scoping_hint(self) -> None:
+        """UnboundLocalError → Python scoping hint about branch assignment."""
+        code = (
+            "def grade(score):\n"
+            "    if score >= 90:\n"
+            "        result = 'A'\n"
+            "    elif score >= 60:\n"
+            "        result = 'B'\n"
+            "    return result\n"   # UnboundLocalError when score < 60
+            "grade(50)\n"
+        )
+        ok, err = validate_fix_runtime(code)
+        assert ok is False
+        assert "UnboundLocalError" in err
+        assert "PYTHON SCOPING HINT" in err
+        assert "result" in err
+        assert "Initialise before the branch" in err
+
+    def test_dict_mutation_during_iteration_hint(self) -> None:
+        """RuntimeError dict changed size → mutation hint."""
+        code = (
+            "d = {'a': 1, 'b': 2, 'c': 3}\n"
+            "for k, v in d.items():\n"
+            "    if v < 2:\n"
+            "        del d[k]\n"
+            "print(d)\n"
+        )
+        ok, err = validate_fix_runtime(code)
+        assert ok is False
+        assert "MUTATION DURING ITERATION HINT" in err
+        assert "list(d.items())" in err
+
+    def test_not_iterable_hint(self) -> None:
+        """TypeError not iterable → missing return hint."""
+        code = (
+            "def get_items():\n"
+            "    items = [1, 2, 3]\n"
+            "    # missing: return items\n"
+            "for x in get_items():\n"
+            "    print(x)\n"
+        )
+        ok, err = validate_fix_runtime(code)
+        assert ok is False
+        assert "NOT ITERABLE HINT" in err
+        assert "return" in err.lower()
+
+    def test_stop_iteration_hint(self) -> None:
+        """StopIteration → exhausted iterator hint."""
+        code = (
+            "it = iter([])\n"
+            "val = next(it)\n"
+            "print(val)\n"
+        )
+        ok, err = validate_fix_runtime(code)
+        assert ok is False
+        assert "StopIteration" in err
+        assert "EXHAUSTED ITERATOR HINT" in err
+        assert "next(it, default)" in err
+
+    def test_identity_comparison_static_check(self) -> None:
+        """if x is 0 → static check catches it before running."""
+        from src.llm_mcp.fix_validators import detect_identity_comparisons
+        code = "if x is 0:\n    pass\n"
+        hits = detect_identity_comparisons(code)
+        assert len(hits) >= 1
+        assert "is" in hits[0]
+
+    def test_hard_stuck_triggers_emergency_pivot(self) -> None:
+        """Three consecutive same errors → EMERGENCY full rewrite directive."""
+        from src.llm_mcp.fix_prompts import build_retry_prompt
+        err = "TypeError: '<' not supported between 'int' and 'NoneType'"
+        attempts = [
+            {"attempt": i, "kind": "runtime", "fix_preview": "x", "err": err}
+            for i in range(3)
+        ]
+        prompt = build_retry_prompt("orig", attempts)
+        assert "EMERGENCY" in prompt
+        assert "FULL FILE REWRITE" in prompt
+        assert "MANDATORY" in prompt
 
 
 # ---------------------------------------------------------------------------
