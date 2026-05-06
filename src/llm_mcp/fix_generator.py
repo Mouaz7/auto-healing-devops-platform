@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 
+from src.llm_mcp.bug_scanner import BugPatternScanner
 from src.llm_mcp.fix_parsers import apply_surgical_patch, parse_response
 from src.llm_mcp.fix_prompts import build_retry_prompt, extract_bug_list
 from src.llm_mcp.fix_validators import (
@@ -226,6 +227,8 @@ class FixGenerator:
     ) -> tuple[str, str]:
         """Pick the prompt template + system message for this run."""
         memory_block = f"\n{memory_ctx}\n" if memory_ctx else ""
+        scan_block = BugPatternScanner.scan(code_context).to_prompt_block()
+        annotated_context = scan_block + code_context if scan_block else code_context
         if complex_mode:
             bug_list = extract_bug_list(compressed_logs)
             prompt = COMPLEX_REPAIR_TEMPLATE.format(
@@ -233,7 +236,7 @@ class FixGenerator:
                 root_cause=analysis.root_cause,
                 affected_files=", ".join(analysis.affected_files),
                 cleaned_logs=compressed_logs,
-                code_context=code_context,
+                code_context=annotated_context,
                 memory_context=memory_block,
                 bug_count=bug_count,
                 bug_list="\n".join(f"  - {b}" for b in bug_list)
@@ -246,7 +249,7 @@ class FixGenerator:
             root_cause=analysis.root_cause,
             affected_files=", ".join(analysis.affected_files),
             cleaned_logs=compressed_logs,
-            code_context=code_context,
+            code_context=annotated_context,
             memory_context=memory_block,
         )
         return prompt, SYSTEM_PROMPT
