@@ -110,6 +110,92 @@ class TestValidateFixRuntimeHint:
         assert ok is True
         assert err == ""
 
+    def test_recursionerror_appends_recursion_hint(self) -> None:
+        """RecursionError → hint about base case and convergence."""
+        code = (
+            "def fib(n):\n"
+            "    if n == 1:\n"          # misses n=0
+            "        return n\n"
+            "    return fib(n-1) + fib(n-2)\n"
+            "fib(0)\n"
+        )
+        ok, err = validate_fix_runtime(code)
+        assert ok is False
+        assert "RecursionError" in err or "maximum recursion" in err.lower()
+        assert "RECURSION HINT" in err
+        assert "base case" in err.lower()
+        assert "n <= 1" in err
+
+    def test_attributeerror_nonetype_appends_missing_return_hint(self) -> None:
+        """AttributeError NoneType → hint about missing return in recursive call."""
+        code = (
+            "class Node:\n"
+            "    def __init__(self, val, nxt=None):\n"
+            "        self.val = val\n"
+            "        self.next = nxt\n"
+            "    def find(self, t):\n"
+            "        if self.val == t: return self\n"
+            "        if self.next: self.next.find(t)\n"   # missing return
+            "        return None\n"
+            "n = Node(1, Node(2, Node(3)))\n"
+            "print(n.find(3).val)\n"    # AttributeError: NoneType.val
+        )
+        ok, err = validate_fix_runtime(code)
+        assert ok is False
+        assert "AttributeError" in err
+        assert "MISSING RETURN HINT" in err
+        assert "return self.next.find" in err
+
+    def test_keyerror_appends_key_guard_hint(self) -> None:
+        """KeyError → hint about checking key existence before access."""
+        code = (
+            "memo = {}\n"
+            "def fib(n):\n"
+            "    if n <= 1: return n\n"
+            "    result = memo[n]\n"     # KeyError: n not yet in memo
+            "    if result is None:\n"
+            "        memo[n] = fib(n-1) + fib(n-2)\n"
+            "    return memo[n]\n"
+            "fib(5)\n"
+        )
+        ok, err = validate_fix_runtime(code)
+        assert ok is False
+        assert "KeyError" in err
+        assert "MISSING KEY GUARD HINT" in err
+        assert "memo.get" in err or "not in memo" in err
+
+    def test_zerodivisionerror_appends_zero_division_hint(self) -> None:
+        """ZeroDivisionError → hint about adding a guard before dividing."""
+        code = (
+            "def avg(nums):\n"
+            "    return sum(nums) / len(nums)\n"
+            "avg([])\n"
+        )
+        ok, err = validate_fix_runtime(code)
+        assert ok is False
+        assert "ZeroDivisionError" in err
+        assert "ZERO DIVISION HINT" in err
+        assert "if not" in err
+
+    def test_infinite_loop_hint_in_timeout_message(self) -> None:
+        """Timeout → improved message with binary search and loop guidance."""
+        code = (
+            "def search(arr, target):\n"
+            "    low, high = 0, len(arr) - 1\n"
+            "    while low <= high:\n"
+            "        mid = (low + high) // 2\n"
+            "        if arr[mid] == target: return mid\n"
+            "        elif arr[mid] < target: low = mid\n"   # never advances
+            "        else: high = mid\n"
+            "    return -1\n"
+            "search([1,2,3,4,5], 5)\n"
+        )
+        ok, err = validate_fix_runtime(code, timeout_s=3)
+        assert ok is False
+        assert "INFINITE LOOP" in err
+        assert "INFINITE LOOP HINT" in err
+        assert "mid + 1" in err
+
 
 # ---------------------------------------------------------------------------
 # _error_fingerprint — normalisation

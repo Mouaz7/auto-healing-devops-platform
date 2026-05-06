@@ -205,7 +205,6 @@ def validate_fix_runtime(fix_code: str, timeout_s: int = 5) -> tuple[bool, str]:
                     "Check EVERY loop bound and EVERY index expression in the function."
                 )
             if "AssertionError" in err:
-                # Extract the assert expression if present for more context
                 assert_line = ""
                 m = re.search(r"AssertionError[^\n]*\n?([^\n]{0,120})", err)
                 if m:
@@ -218,10 +217,62 @@ def validate_fix_runtime(fix_code: str, timeout_s: int = 5) -> tuple[bool, str]:
                     "     (comparison `total == num` is a no-op, not accumulation)\n"
                     "  2. Wrong return value on edge case: `return 1` or `return None`\n"
                     "     instead of a computed result (e.g. `return 0` for empty list)\n"
-                    "  3. Using the wrong variable: `total = num` instead of `total += num`\n"
+                    "  3. Mutable default argument: `def f(x, lst=[])` shares the same\n"
+                    "     list object across ALL calls — use `lst=None` then `lst = lst or []`\n"
                     "  4. Missing accumulation: loop body does not update any variable\n"
                     + (f"  Assert context: {assert_line}\n" if assert_line else "")
                     + "Trace the data flow step by step from input to output."
+                )
+            if "RecursionError" in err or "maximum recursion depth" in err:
+                err += (
+                    "\n\n*** RECURSION HINT ***\n"
+                    "RecursionError means the function calls itself forever — the base "
+                    "case is missing or unreachable.\n"
+                    "  1. Does the base case exist? (e.g. `if n <= 1: return n`)\n"
+                    "  2. Is the condition too strict? `n == 0` misses negative or n=1 —\n"
+                    "     use `n <= 1` for Fibonacci/factorial.\n"
+                    "  3. Does each recursive call move TOWARD the base case?\n"
+                    "     `fib(n-1)` converges; `fib(n)` or `fib(n+1)` loops forever.\n"
+                    "Find the recursive function and verify every code path reaches "
+                    "a `return` that does NOT recurse."
+                )
+            if "AttributeError" in err and "NoneType" in err and "has no attribute" in err:
+                attr_match = re.search(r"has no attribute '([^']+)'", err)
+                attr_name = attr_match.group(1) if attr_match else ""
+                err += (
+                    "\n\n*** MISSING RETURN HINT ***\n"
+                    f"AttributeError: NoneType has no attribute "
+                    f"'{attr_name}' means a function returned None when it should "
+                    "have returned an object.\n"
+                    "  1. In recursive traversal: does the recursive call get RETURNED?\n"
+                    "     `return self.next.find(x)` — not just `self.next.find(x)`\n"
+                    "  2. Does every branch of the function end with `return <value>`?\n"
+                    "  3. In search functions: is there a `return node` (not just `return`)\n"
+                    "     when the target is found?\n"
+                    "Find every function in the traceback chain and check ALL return paths."
+                )
+            if "KeyError" in err:
+                key_match = re.search(r"KeyError: ([^\n]+)", err)
+                key_info = key_match.group(1).strip() if key_match else ""
+                err += (
+                    "\n\n*** MISSING KEY GUARD HINT ***\n"
+                    + (f"KeyError: {key_info} — " if key_info else "KeyError — ")
+                    + "you accessed a dict key that does not exist yet.\n"
+                    "  1. For memo/cache: check `if n not in memo:` before `memo[n]`\n"
+                    "  2. Use safe access: `memo.get(n)` returns None instead of crashing\n"
+                    "  3. For counters: `counts[k] = counts.get(k, 0) + 1`\n"
+                    "  4. Build the entry BEFORE reading it: compute, then store, then return\n"
+                    "Find every `dict[variable]` and replace with a guarded pattern."
+                )
+            if "ZeroDivisionError" in err:
+                err += (
+                    "\n\n*** ZERO DIVISION HINT ***\n"
+                    "ZeroDivisionError means the denominator is zero. Add a guard:\n"
+                    "  1. For averages: `if not numbers: return 0.0` before dividing\n"
+                    "  2. Inline guard: `return (total / n) if n else 0.0`\n"
+                    "  3. For percentages: `return (a / b * 100) if b else 0`\n"
+                    "Find every `/` and `//` operator and check if the denominator "
+                    "can be zero when the input is empty or all-zero."
                 )
             return False, f"RuntimeError: {err}"
 
@@ -237,8 +288,18 @@ def validate_fix_runtime(fix_code: str, timeout_s: int = 5) -> tuple[bool, str]:
         return True, ""
     except subprocess.TimeoutExpired:
         return False, (
-            f"INFINITE LOOP: code did not finish within {timeout_s}s "
-            "— your fix still has a bug"
+            f"INFINITE LOOP: code did not finish within {timeout_s}s — "
+            "your fix still has a bug.\n\n"
+            "*** INFINITE LOOP HINT ***\n"
+            "Common causes:\n"
+            "  1. Binary search: `low = mid` / `high = mid` instead of\n"
+            "     `low = mid + 1` / `high = mid - 1` — mid never moves past\n"
+            "  2. While-loop condition never becomes False: check that the\n"
+            "     loop variable is updated INSIDE the loop body\n"
+            "  3. Recursive call with the same arguments: `f(n)` calls `f(n)`\n"
+            "     — ensure the argument shrinks toward the base case\n"
+            "  4. Missing `break` or `return` inside a `while True:` loop\n"
+            "Mentally run one iteration: does the state change toward termination?"
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.warning("runtime_validation_skipped err=%s", exc)
