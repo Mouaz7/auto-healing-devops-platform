@@ -110,10 +110,14 @@ def extract_bug_list(logs: str) -> list[str]:
         r"(SyntaxError[^\n]*)",
         r"(NameError[^\n]*)",
         r"(TypeError[^\n]*)",
+        r"(IndexError[^\n]*)",
+        r"(AssertionError[^\n]*)",
+        r"(ZeroDivisionError[^\n]*)",
         r"(IndentationError[^\n]*)",
         r"(AttributeError[^\n]*)",
         r"(ValueError[^\n]*)",
         r"(FAILED\s+\S+\.py[^\n]*)",
+        r"E\s+(assert[^\n]*)",
         r"E\s+(.*Error[^\n]*)",
     ]
     bugs: list[str] = []

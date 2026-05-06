@@ -40,15 +40,75 @@ class TestValidateFixRuntimeHint:
 
     def test_nonetype_without_typeerror_does_not_get_hint(self) -> None:
         """The hint requires BOTH 'NoneType' and 'TypeError' to fire."""
-        # Pure runtime error mentioning NoneType in output but as AttributeError
         code = (
             "x = None\n"
             "x.foo()\n"
         )
         ok, err = validate_fix_runtime(code)
         assert ok is False
-        # AttributeError on NoneType — not the call-site pattern we redirect on
         assert "ROOT-CAUSE HINT" not in err
+
+    def test_indexerror_out_of_range_appends_offbyone_hint(self) -> None:
+        """IndexError 'list index out of range' → off-by-one hint."""
+        code = (
+            "def avg(nums):\n"
+            "    total = 0\n"
+            "    for i in range(len(nums) + 1):\n"
+            "        total += nums[i]\n"
+            "    return total / len(nums)\n"
+            "avg([1, 2, 3])\n"
+        )
+        ok, err = validate_fix_runtime(code)
+        assert ok is False
+        assert "IndexError" in err
+        assert "OFF-BY-ONE HINT" in err
+        assert "range(len(x) + 1)" in err
+
+    def test_assertionerror_appends_silent_bug_hint(self) -> None:
+        """AssertionError (wrong output) → silent bug hint with operator guidance."""
+        code = (
+            "def avg(nums):\n"
+            "    total = 0.0\n"
+            "    for num in nums:\n"
+            "        total == num\n"   # comparison not accumulation
+            "    return total / len(nums)\n"
+            "result = avg([1, 2, 3])\n"
+            "assert result == 2.0, f'Expected 2.0, got {result}'\n"
+        )
+        ok, err = validate_fix_runtime(code)
+        assert ok is False
+        assert "AssertionError" in err
+        assert "SILENT BUG HINT" in err
+        assert "Wrong operator" in err
+        assert "+=" in err
+
+    def test_wrong_return_value_assertionerror_hint(self) -> None:
+        """return 1 on empty list triggers AssertionError → silent bug hint."""
+        code = (
+            "def avg(nums):\n"
+            "    if not nums:\n"
+            "        return 1\n"
+            "    return sum(nums) / len(nums)\n"
+            "result = avg([])\n"
+            "assert result == 0, f'Expected 0, got {result}'\n"
+        )
+        ok, err = validate_fix_runtime(code)
+        assert ok is False
+        assert "SILENT BUG HINT" in err
+        assert "Wrong return value" in err
+
+    def test_clean_code_gets_no_hints(self) -> None:
+        """Correct code should pass with no hints appended."""
+        code = (
+            "def avg(nums):\n"
+            "    if not nums:\n"
+            "        return 0.0\n"
+            "    return sum(nums) / len(nums)\n"
+            "avg([1, 2, 3])\n"
+        )
+        ok, err = validate_fix_runtime(code)
+        assert ok is True
+        assert err == ""
 
 
 # ---------------------------------------------------------------------------

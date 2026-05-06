@@ -194,6 +194,35 @@ def validate_fix_runtime(fix_code: str, timeout_s: int = 5) -> tuple[bool, str]:
                     "instead of `quicksort(my_array, 0, len(my_array)-1)`). "
                     "Fix the CALL, not the default-argument check."
                 )
+            if "IndexError" in err and "list index out of range" in err:
+                err += (
+                    "\n\n*** OFF-BY-ONE HINT ***\n"
+                    "IndexError 'list index out of range' almost always means a loop "
+                    "bound is one too large. Common patterns:\n"
+                    "  1. range(len(x) + 1) should be range(len(x))\n"
+                    "  2. range(len(x)) with x[i+1] inside — stop at len(x)-1\n"
+                    "  3. range(1, len(x)+1) off by one at the end\n"
+                    "Check EVERY loop bound and EVERY index expression in the function."
+                )
+            if "AssertionError" in err:
+                # Extract the assert expression if present for more context
+                assert_line = ""
+                m = re.search(r"AssertionError[^\n]*\n?([^\n]{0,120})", err)
+                if m:
+                    assert_line = m.group(1).strip()
+                err += (
+                    "\n\n*** SILENT BUG HINT ***\n"
+                    "An AssertionError means the code runs without crashing but "
+                    "produces WRONG OUTPUT. Do NOT look for crashes — look for:\n"
+                    "  1. Wrong operator: `==` used instead of `+=` or `-=`\n"
+                    "     (comparison `total == num` is a no-op, not accumulation)\n"
+                    "  2. Wrong return value on edge case: `return 1` or `return None`\n"
+                    "     instead of a computed result (e.g. `return 0` for empty list)\n"
+                    "  3. Using the wrong variable: `total = num` instead of `total += num`\n"
+                    "  4. Missing accumulation: loop body does not update any variable\n"
+                    + (f"  Assert context: {assert_line}\n" if assert_line else "")
+                    + "Trace the data flow step by step from input to output."
+                )
             return False, f"RuntimeError: {err}"
 
         out = result.stdout or ""
