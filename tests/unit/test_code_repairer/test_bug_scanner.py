@@ -775,3 +775,483 @@ class TestInconsistentReturn:
             "    return -1\n"
         )
         assert "inconsistent_return" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 34 — star_import
+# ---------------------------------------------------------------------------
+
+class TestStarImport:
+    def test_detects_from_star(self) -> None:
+        code = "from os import *\n"
+        assert "star_import" in patterns(code)
+
+    def test_named_import_is_fine(self) -> None:
+        code = "from os import path, getcwd\n"
+        assert "star_import" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 35 — import_in_loop
+# ---------------------------------------------------------------------------
+
+class TestImportInLoop:
+    def test_detects_import_in_for(self) -> None:
+        code = "for i in range(3):\n    import os\n    print(i)\n"
+        assert "import_in_loop" in patterns(code)
+
+    def test_top_level_import_fine(self) -> None:
+        code = "import os\nfor i in range(3):\n    print(os.getcwd())\n"
+        assert "import_in_loop" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 36 — list_multiply_shared_refs
+# ---------------------------------------------------------------------------
+
+class TestListMultiplySharedRefs:
+    def test_detects_list_of_lists_multiply(self) -> None:
+        code = "grid = [[0]] * 3\n"
+        assert "list_multiply_shared_refs" in patterns(code)
+
+    def test_list_of_ints_is_fine(self) -> None:
+        code = "zeros = [0] * 5\n"
+        assert "list_multiply_shared_refs" not in patterns(code)
+
+    def test_list_comp_is_fine(self) -> None:
+        code = "grid = [[] for _ in range(3)]\n"
+        assert "list_multiply_shared_refs" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 37 — missing_super_init
+# ---------------------------------------------------------------------------
+
+class TestMissingSuperInit:
+    def test_detects_subclass_without_super(self) -> None:
+        code = (
+            "class Dog(Animal):\n"
+            "    def __init__(self, name):\n"
+            "        self.name = name\n"
+        )
+        assert "missing_super_init" in patterns(code)
+
+    def test_with_super_call_is_fine(self) -> None:
+        code = (
+            "class Dog(Animal):\n"
+            "    def __init__(self, name):\n"
+            "        super().__init__()\n"
+            "        self.name = name\n"
+        )
+        assert "missing_super_init" not in patterns(code)
+
+    def test_no_bases_is_fine(self) -> None:
+        code = (
+            "class Dog:\n"
+            "    def __init__(self):\n"
+            "        self.name = 'Rex'\n"
+        )
+        assert "missing_super_init" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 38 — class_mutable_attribute
+# ---------------------------------------------------------------------------
+
+class TestClassMutableAttribute:
+    def test_detects_class_level_list(self) -> None:
+        code = "class Cart:\n    items = []\n"
+        assert "class_mutable_attribute" in patterns(code)
+
+    def test_detects_class_level_dict(self) -> None:
+        code = "class Cache:\n    store = {}\n"
+        assert "class_mutable_attribute" in patterns(code)
+
+    def test_instance_attr_in_init_is_fine(self) -> None:
+        code = "class Cart:\n    def __init__(self):\n        self.items = []\n"
+        assert "class_mutable_attribute" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 39 — dict_fromkeys_mutable_default
+# ---------------------------------------------------------------------------
+
+class TestDictFromkeysMutable:
+    def test_detects_list_default(self) -> None:
+        code = "d = dict.fromkeys(['a', 'b'], [])\n"
+        assert "dict_fromkeys_mutable_default" in patterns(code)
+
+    def test_int_default_is_fine(self) -> None:
+        code = "d = dict.fromkeys(['a', 'b'], 0)\n"
+        assert "dict_fromkeys_mutable_default" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 40 — wrong_exception_reraise
+# ---------------------------------------------------------------------------
+
+class TestWrongExceptionReraise:
+    def test_detects_raise_wrapping_caught_var(self) -> None:
+        code = (
+            "try:\n"
+            "    f()\n"
+            "except ValueError as e:\n"
+            "    raise Exception(e)\n"
+        )
+        assert "wrong_exception_reraise" in patterns(code)
+
+    def test_bare_raise_is_fine(self) -> None:
+        code = (
+            "try:\n"
+            "    f()\n"
+            "except ValueError:\n"
+            "    raise\n"
+        )
+        assert "wrong_exception_reraise" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 41 — max_min_without_guard
+# ---------------------------------------------------------------------------
+
+class TestMaxMinWithoutGuard:
+    def test_detects_max_no_guard(self) -> None:
+        code = "def top(lst):\n    return max(lst)\n"
+        assert "max_min_without_guard" in patterns(code)
+
+    def test_with_guard_is_fine(self) -> None:
+        code = (
+            "def top(lst):\n"
+            "    if not lst:\n"
+            "        return None\n"
+            "    return max(lst)\n"
+        )
+        assert "max_min_without_guard" not in patterns(code)
+
+    def test_max_of_multiple_args_is_fine(self) -> None:
+        code = "x = max(a, b, c)\n"
+        assert "max_min_without_guard" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 42 — comparison_with_itself
+# ---------------------------------------------------------------------------
+
+class TestComparisonWithItself:
+    def test_detects_x_eq_x(self) -> None:
+        code = "if x == x:\n    pass\n"
+        assert "comparison_with_itself" in patterns(code)
+
+    def test_detects_x_neq_x(self) -> None:
+        code = "if x != x:\n    pass\n"
+        assert "comparison_with_itself" in patterns(code)
+
+    def test_different_vars_is_fine(self) -> None:
+        code = "if x == y:\n    pass\n"
+        assert "comparison_with_itself" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 43 — infinite_while_no_break
+# ---------------------------------------------------------------------------
+
+class TestInfiniteWhileNoBreak:
+    def test_detects_while_true_no_break(self) -> None:
+        code = "while True:\n    print('hi')\n"
+        assert "infinite_while_no_break" in patterns(code)
+
+    def test_while_true_with_break_is_fine(self) -> None:
+        code = "while True:\n    x = input()\n    if x == 'q':\n        break\n"
+        assert "infinite_while_no_break" not in patterns(code)
+
+    def test_while_true_with_return_is_fine(self) -> None:
+        code = "def f():\n    while True:\n        return 1\n"
+        assert "infinite_while_no_break" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 44 — range_excludes_last_element
+# ---------------------------------------------------------------------------
+
+class TestRangeExcludesLast:
+    def test_detects_len_minus_one(self) -> None:
+        code = "for i in range(len(lst) - 1):\n    pass\n"
+        assert "range_excludes_last_element" in patterns(code)
+
+    def test_range_len_full_is_fine(self) -> None:
+        code = "for i in range(len(lst)):\n    pass\n"
+        assert "range_excludes_last_element" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 45 — slice_wrong_direction
+# ---------------------------------------------------------------------------
+
+class TestSliceWrongDirection:
+    def test_detects_constant_reverse_no_step(self) -> None:
+        code = "x = lst[5:0]\n"
+        assert "slice_wrong_direction" in patterns(code)
+
+    def test_with_step_is_fine(self) -> None:
+        code = "x = lst[5:0:-1]\n"
+        assert "slice_wrong_direction" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 46 — callable_default_arg
+# ---------------------------------------------------------------------------
+
+class TestCallableDefaultArg:
+    def test_detects_datetime_default(self) -> None:
+        code = "def f(t=datetime.now()):\n    pass\n"
+        assert "callable_default_arg" in patterns(code)
+
+    def test_constant_default_is_fine(self) -> None:
+        code = "def f(t=None):\n    pass\n"
+        assert "callable_default_arg" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 47 — extend_with_string
+# ---------------------------------------------------------------------------
+
+class TestExtendWithString:
+    def test_detects_extend_string_literal(self) -> None:
+        code = "result.extend('hello')\n"
+        assert "extend_with_string" in patterns(code)
+
+    def test_extend_list_is_fine(self) -> None:
+        code = "result.extend([1, 2, 3])\n"
+        assert "extend_with_string" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 48 — truediv_as_index
+# ---------------------------------------------------------------------------
+
+class TestTruedivAsIndex:
+    def test_detects_float_division_as_index(self) -> None:
+        code = "x = lst[n/2]\n"
+        assert "truediv_as_index" in patterns(code)
+
+    def test_floor_division_is_fine(self) -> None:
+        code = "x = lst[n//2]\n"
+        assert "truediv_as_index" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 49 — assert_tuple
+# ---------------------------------------------------------------------------
+
+class TestAssertTuple:
+    def test_detects_two_element_tuple(self) -> None:
+        code = "assert (x > 0, 'must be positive')\n"
+        assert "assert_tuple" in patterns(code)
+
+    def test_correct_assert_with_msg_is_fine(self) -> None:
+        code = "assert x > 0, 'must be positive'\n"
+        assert "assert_tuple" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 50 — or_default_loses_falsy
+# ---------------------------------------------------------------------------
+
+class TestOrDefaultLosesFalsy:
+    def test_detects_x_or_default(self) -> None:
+        code = "count = count or 0\n"
+        assert "or_default_loses_falsy" in patterns(code)
+
+    def test_none_check_is_fine(self) -> None:
+        code = "if count is None:\n    count = 0\n"
+        assert "or_default_loses_falsy" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 51 — return_first_iteration
+# ---------------------------------------------------------------------------
+
+class TestReturnFirstIteration:
+    def test_detects_unconditional_return_in_loop(self) -> None:
+        code = "for x in lst:\n    return x\n"
+        assert "return_first_iteration" in patterns(code)
+
+    def test_conditional_return_is_fine(self) -> None:
+        code = "for x in lst:\n    if x > 0:\n        return x\n"
+        assert "return_first_iteration" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 52 — raise_in_finally
+# ---------------------------------------------------------------------------
+
+class TestRaiseInFinally:
+    def test_detects_raise_in_finally(self) -> None:
+        code = (
+            "try:\n"
+            "    f()\n"
+            "finally:\n"
+            "    raise ValueError('bad')\n"
+        )
+        assert "raise_in_finally" in patterns(code)
+
+    def test_cleanup_in_finally_is_fine(self) -> None:
+        code = (
+            "try:\n"
+            "    f()\n"
+            "finally:\n"
+            "    conn.close()\n"
+        )
+        assert "raise_in_finally" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 53 — while_condition_unchanged
+# ---------------------------------------------------------------------------
+
+class TestWhileConditionUnchanged:
+    def test_detects_unchanging_var(self) -> None:
+        code = "running = True\nwhile running:\n    x = 1\n"
+        assert "while_condition_unchanged" in patterns(code)
+
+    def test_condition_modified_is_fine(self) -> None:
+        code = (
+            "running = True\n"
+            "while running:\n"
+            "    running = False\n"
+        )
+        assert "while_condition_unchanged" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 54 — sort_returns_none
+# ---------------------------------------------------------------------------
+
+class TestSortReturnsNone:
+    def test_detects_assigned_sort(self) -> None:
+        code = "result = items.sort()\n"
+        assert "sort_returns_none" in patterns(code)
+
+    def test_standalone_sort_is_fine(self) -> None:
+        code = "items.sort()\n"
+        assert "sort_returns_none" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 55 — print_returns_none
+# ---------------------------------------------------------------------------
+
+class TestPrintReturnsNone:
+    def test_detects_assigned_print(self) -> None:
+        code = "val = print('hello')\n"
+        assert "print_returns_none" in patterns(code)
+
+    def test_standalone_print_is_fine(self) -> None:
+        code = "print('hello')\n"
+        assert "print_returns_none" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 56 — append_list_literal
+# ---------------------------------------------------------------------------
+
+class TestAppendListLiteral:
+    def test_detects_append_list(self) -> None:
+        code = "result.append([1, 2, 3])\n"
+        assert "append_list_literal" in patterns(code)
+
+    def test_extend_is_fine(self) -> None:
+        code = "result.extend([1, 2, 3])\n"
+        assert "append_list_literal" not in patterns(code)
+
+    def test_append_scalar_is_fine(self) -> None:
+        code = "result.append(42)\n"
+        assert "append_list_literal" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 59 — len_compared_to_zero
+# ---------------------------------------------------------------------------
+
+class TestLenComparedToZero:
+    def test_detects_len_eq_zero(self) -> None:
+        code = "if len(lst) == 0:\n    pass\n"
+        assert "len_compared_to_zero" in patterns(code)
+
+    def test_not_x_is_fine(self) -> None:
+        code = "if not lst:\n    pass\n"
+        assert "len_compared_to_zero" not in patterns(code)
+
+    def test_len_eq_nonzero_is_fine(self) -> None:
+        code = "if len(lst) == 3:\n    pass\n"
+        assert "len_compared_to_zero" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 60 — recursive_mutable_default
+# ---------------------------------------------------------------------------
+
+class TestRecursiveMutableDefault:
+    def test_detects_recursive_with_mutable_default(self) -> None:
+        code = (
+            "def flatten(lst, result=[]):\n"
+            "    for item in lst:\n"
+            "        if isinstance(item, list):\n"
+            "            flatten(item, result)\n"
+            "        else:\n"
+            "            result.append(item)\n"
+            "    return result\n"
+        )
+        assert "recursive_mutable_default" in patterns(code)
+
+    def test_none_default_in_recursive_is_fine(self) -> None:
+        code = (
+            "def fib(n, memo=None):\n"
+            "    if memo is None: memo = {}\n"
+            "    if n <= 1: return n\n"
+            "    if n not in memo: memo[n] = fib(n-1, memo) + fib(n-2, memo)\n"
+            "    return memo[n]\n"
+        )
+        assert "recursive_mutable_default" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 61 — fstring_no_interpolation
+# ---------------------------------------------------------------------------
+
+class TestFstringNoInterpolation:
+    def test_detects_fstring_no_braces(self) -> None:
+        code = 'msg = f"hello world"\n'
+        assert "fstring_no_interpolation" in patterns(code)
+
+    def test_fstring_with_placeholder_is_fine(self) -> None:
+        code = 'msg = f"hello {name}"\n'
+        assert "fstring_no_interpolation" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 62 — join_non_string_elements
+# ---------------------------------------------------------------------------
+
+class TestJoinNonStringElements:
+    def test_detects_join_int_list(self) -> None:
+        code = "x = ', '.join([1, 2, 3])\n"
+        assert "join_non_string_elements" in patterns(code)
+
+    def test_join_string_list_is_fine(self) -> None:
+        code = "x = ', '.join(['a', 'b', 'c'])\n"
+        assert "join_non_string_elements" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 63 — sum_of_lists
+# ---------------------------------------------------------------------------
+
+class TestSumOfLists:
+    def test_detects_sum_nested_lists(self) -> None:
+        code = "x = sum([[1, 2], [3, 4]])\n"
+        assert "sum_of_lists" in patterns(code)
+
+    def test_sum_flat_list_is_fine(self) -> None:
+        code = "x = sum([1, 2, 3, 4])\n"
+        assert "sum_of_lists" not in patterns(code)

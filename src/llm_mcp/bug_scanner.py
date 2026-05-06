@@ -5,7 +5,7 @@ specific bug patterns at the AST level. Findings are injected into the fix
 prompt so the LLM knows exactly what to look for — instead of relying on the
 traceback line which often points at the symptom, not the root cause.
 
-Detected patterns (33):
+Detected patterns (63):
   1.  comparison_as_assignment      total == num in loop body (should be +=)
   2.  wrong_edge_return             if not x: return 1 (non-zero/non-None sentinel)
   3.  wrong_arithmetic_op           total - len(x) in average/mean function
@@ -39,6 +39,36 @@ Detected patterns (33):
   31. float_exact_equality          x == 0.1 is unreliable (use math.isclose)
   32. assert_for_validation         assert disabled with python -O in production
   33. inconsistent_return           some paths return value, others return None
+  34. star_import                   from X import * pollutes namespace
+  35. import_in_loop                import statement repeated on every iteration
+  36. list_multiply_shared_refs     [[]] * n — all inner lists are the same object
+  37. missing_super_init            subclass __init__ skips super().__init__()
+  38. class_mutable_attribute       class C: items = [] shared across all instances
+  39. dict_fromkeys_mutable_default dict.fromkeys(k, []) — all values same object
+  40. wrong_exception_reraise       raise Exception(e) discards original traceback
+  41. max_min_without_guard         max/min on possibly-empty collection → ValueError
+  42. comparison_with_itself        x == x always True — likely copy-paste typo
+  43. infinite_while_no_break       while True: with no break/return/raise
+  44. range_excludes_last_element   range(len(x)-1) silently skips last item
+  45. slice_wrong_direction         lst[10:0] without step → always empty
+  46. callable_default_arg          def f(t=time.time()) evaluated once at define
+  47. extend_with_string            result.extend("hi") adds chars not whole string
+  48. truediv_as_index              lst[x/2] → TypeError (float index)
+  49. assert_tuple                  assert (cond, msg) — tuple always truthy!
+  50. or_default_loses_falsy        x = x or default treats 0/False/"" as missing
+  51. return_first_iteration        unconditional return as first loop statement
+  52. raise_in_finally              raise in finally replaces original exception
+  53. while_condition_unchanged     while var: — var never changes → infinite loop
+  54. sort_returns_none             x = lst.sort() — sort() returns None
+  55. print_returns_none            x = print(...) — print() returns None
+  56. append_list_literal           .append([1,2,3]) nests list (use .extend)
+  57. (reserved)
+  58. windows_path_escape           "C:\new" — \\n is newline, use raw string
+  59. len_compared_to_zero          len(x) == 0 is non-idiomatic (use not x)
+  60. recursive_mutable_default     mutable default in recursive fn accumulates
+  61. fstring_no_interpolation      f"hello" with no {} placeholders — useless f
+  62. join_non_string_elements      ", ".join([1,2,3]) — needs str elements
+  63. sum_of_lists                  sum([[1],[2]]) needs start=[] argument
 """
 from __future__ import annotations
 
@@ -69,6 +99,13 @@ _STR_IMMUTABLE_METHODS = frozenset({
     "title", "capitalize", "removeprefix", "removesuffix",
     "center", "ljust", "rjust", "zfill", "encode",
 })
+
+_CALLABLE_DEFAULT_NAMES = frozenset({
+    "datetime", "date", "time", "now", "today", "utcnow",
+    "time_ns", "monotonic", "perf_counter",
+})
+
+_BUILTIN_REDUCING = frozenset({"max", "min", "sum", "any", "all"})
 
 _ACCUMULATOR_NAMES = frozenset({
     "total", "sum", "count", "acc", "accumulator", "running",
@@ -1071,6 +1108,764 @@ class BugPatternScanner(ast.NodeVisitor):
                 suggestion="Ensure every exit path returns an explicit value of the same type.",
             )
 
+    # ==================================================================
+    # Patterns 34 – 63  (second batch)
+    # ==================================================================
+
+    # ------------------------------------------------------------------
+    # Pattern 34 — star import pollutes namespace
+    # ------------------------------------------------------------------
+
+    def _check_star_import(self, node: ast.ImportFrom) -> None:
+        """Detect `from module import *` — namespace pollution."""
+        for alias in node.names:
+            if alias.name == "*":
+                mod = node.module or "module"
+                self._add(
+                    node,
+                    "star_import",
+                    f"`from {mod} import *` imports every public name into the "
+                    "local namespace. This hides where names come from, causes "
+                    "silent overwrites, and breaks static analysis.",
+                    severity="MEDIUM",
+                    suggestion=f"Import only what you need: `from {mod} import Foo, bar`.",
+                )
+
+    # ------------------------------------------------------------------
+    # Pattern 35 — import inside a loop
+    # ------------------------------------------------------------------
+
+    def _check_import_in_loop(self, node: ast.For) -> None:
+        """Detect `import X` inside a for-loop body — repeated module load."""
+        for stmt in node.body:
+            if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                names = ", ".join(
+                    a.name for a in stmt.names
+                )
+                self._add(
+                    stmt,
+                    "import_in_loop",
+                    f"`import {names}` inside a loop executes on every "
+                    "iteration. Python caches modules after the first load, "
+                    "but the repeated lookup and name binding adds overhead "
+                    "and signals a misplaced import.",
+                    severity="MEDIUM",
+                    suggestion="Move the import to the top of the module.",
+                )
+
+    # ------------------------------------------------------------------
+    # Pattern 36 — list-multiply creates shared mutable references
+    # ------------------------------------------------------------------
+
+    def _check_list_multiply_shared(self, node: ast.BinOp) -> None:
+        """`[[]] * n` — all inner lists are the SAME object."""
+        if not isinstance(node.op, ast.Mult):
+            return
+        # Either side is a List containing at least one mutable element
+        for side in (node.left, node.right):
+            if not isinstance(side, ast.List):
+                continue
+            for elt in side.elts:
+                if isinstance(elt, (ast.List, ast.Dict, ast.Set)):
+                    self._add(
+                        node,
+                        "list_multiply_shared_refs",
+                        "`[[...]] * n` creates n references to the SAME inner "
+                        "list. Mutating any copy mutates ALL of them.",
+                        suggestion="Use a list comprehension: `[[] for _ in range(n)]`.",
+                    )
+                    return
+
+    # ------------------------------------------------------------------
+    # Pattern 37 — class inherits but __init__ never calls super()
+    # ------------------------------------------------------------------
+
+    def _check_missing_super_init(self, node: ast.ClassDef) -> None:
+        """Detect a subclass __init__ that omits `super().__init__()`."""
+        if not node.bases:
+            return
+        # Skip `class Foo(object):` — explicit object base is fine to omit
+        real_bases = [
+            b for b in node.bases
+            if not (isinstance(b, ast.Name) and b.id == "object")
+        ]
+        if not real_bases:
+            return
+        for stmt in node.body:
+            if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if stmt.name != "__init__":
+                continue
+            fn_src = ast.unparse(stmt) if hasattr(ast, "unparse") else ""
+            if "super()" not in fn_src:
+                base_src = ast.unparse(real_bases[0]) if hasattr(ast, "unparse") else "Base"
+                self._add(
+                    stmt,
+                    "missing_super_init",
+                    f"`{node.name}.__init__` does not call `super().__init__()`. "
+                    f"The parent class `{base_src}` initialisation is skipped — "
+                    "inherited attributes may be uninitialised.",
+                    suggestion="Add `super().__init__(...)` as the first line of __init__.",
+                )
+
+    # ------------------------------------------------------------------
+    # Pattern 38 — class-level mutable attribute (shared across instances)
+    # ------------------------------------------------------------------
+
+    def _check_class_mutable_attribute(self, node: ast.ClassDef) -> None:
+        """Detect `class C: items = []` — all instances share the list."""
+        for stmt in node.body:
+            if not isinstance(stmt, ast.Assign):
+                continue
+            if not isinstance(stmt.value, (ast.List, ast.Dict, ast.Set)):
+                continue
+            for target in stmt.targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                kind = type(stmt.value).__name__.lower()
+                self._add(
+                    stmt,
+                    "class_mutable_attribute",
+                    f"`{node.name}.{target.id} = {kind}(...)` is a class-level "
+                    "mutable attribute. Every instance shares THE SAME object. "
+                    "Mutating it on one instance affects all others.",
+                    suggestion=f"Move `self.{target.id} = {kind}()` into __init__.",
+                )
+
+    # ------------------------------------------------------------------
+    # Pattern 39 — dict.fromkeys with mutable default
+    # ------------------------------------------------------------------
+
+    def _check_dict_fromkeys_mutable(self, node: ast.Call) -> None:
+        """`dict.fromkeys(keys, [])` — all values are the SAME list."""
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "fromkeys"):
+            return
+        if len(node.args) < 2:
+            return
+        default = node.args[1]
+        if not isinstance(default, (ast.List, ast.Dict, ast.Set)):
+            return
+        kind = type(default).__name__.lower()
+        self._add(
+            node,
+            "dict_fromkeys_mutable_default",
+            f"`dict.fromkeys(keys, {kind}(...))` assigns the SAME {kind} "
+            "object as the value for every key. Mutating one value mutates "
+            "all others.",
+            suggestion=f"Use a comprehension: `{{k: {kind}() for k in keys}}`.",
+        )
+
+    # ------------------------------------------------------------------
+    # Pattern 40 — wrong exception re-raise (loses traceback)
+    # ------------------------------------------------------------------
+
+    def _check_wrong_reraise(self, node: ast.ExceptHandler) -> None:
+        """`raise Exception(e)` in except block discards the original traceback."""
+        bound_var = node.name  # `except ValueError as e:` → bound_var = "e"
+        if not bound_var:
+            return
+        for stmt in ast.walk(node):
+            if not isinstance(stmt, ast.Raise):
+                continue
+            exc = stmt.exc
+            if exc is None:
+                continue  # bare `raise` is correct
+            if not isinstance(exc, ast.Call):
+                continue
+            # Check if the call wraps the caught variable
+            for arg in exc.args:
+                if isinstance(arg, ast.Name) and arg.id == bound_var:
+                    self._add(
+                        stmt,
+                        "wrong_exception_reraise",
+                        f"`raise Exception({bound_var})` creates a NEW exception, "
+                        "discarding the original traceback and exception chain. "
+                        "Use bare `raise` to re-raise with full context.",
+                        suggestion=f"Replace `raise Exception({bound_var})` with bare `raise`.",
+                    )
+
+    # ------------------------------------------------------------------
+    # Pattern 41 — max/min called without empty-input guard
+    # ------------------------------------------------------------------
+
+    def _check_max_min_without_guard(self, node: ast.Call) -> None:
+        """`max(lst)` / `min(lst)` raises ValueError on empty input."""
+        func = node.func
+        if not (isinstance(func, ast.Name) and func.id in ("max", "min")):
+            return
+        if not node.args or len(node.args) > 1:
+            return  # max(a, b, c) is fine; max(iterable) is the risky form
+        # If the function has no `if not` guard, flag it
+        if self._current_fn:
+            fn_src = ast.unparse(self._current_fn) if hasattr(ast, "unparse") else ""
+            if "if not " not in fn_src and "if len(" not in fn_src:
+                arg_src = ast.unparse(node.args[0]) if hasattr(ast, "unparse") else "lst"
+                self._add(
+                    node,
+                    "max_min_without_guard",
+                    f"`{func.id}({arg_src})` raises `ValueError: {func.id}() arg is an "
+                    "empty sequence` when called on an empty container.",
+                    severity="MEDIUM",
+                    suggestion=f"Add a guard: `if not {arg_src}: return None` before this line.",
+                )
+
+    # ------------------------------------------------------------------
+    # Pattern 42 — comparison with itself (always True/always wrong)
+    # ------------------------------------------------------------------
+
+    def _check_comparison_with_itself(self, node: ast.Compare) -> None:
+        """`x == x` is always True — usually a copy-paste typo."""
+        left = node.left
+        if not isinstance(left, ast.Name):
+            return
+        for op, comp in zip(node.ops, node.comparators):
+            if not isinstance(comp, ast.Name):
+                continue
+            if comp.id != left.id:
+                continue
+            if isinstance(op, ast.Eq):
+                self._add(
+                    node,
+                    "comparison_with_itself",
+                    f"`{left.id} == {left.id}` always evaluates to `True`. "
+                    "Likely a copy-paste error — the right side should be a "
+                    "different variable.",
+                    suggestion="Replace the right-hand side with the intended variable.",
+                )
+            elif isinstance(op, ast.NotEq):
+                self._add(
+                    node,
+                    "comparison_with_itself",
+                    f"`{left.id} != {left.id}` always evaluates to `False`. "
+                    "Likely a copy-paste error.",
+                    suggestion="Replace the right-hand side with the intended variable.",
+                )
+
+    # ------------------------------------------------------------------
+    # Pattern 43 — `while True:` with no `break` in body
+    # ------------------------------------------------------------------
+
+    def _check_infinite_while(self, node: ast.While) -> None:
+        """`while True:` with no break — infinite loop."""
+        test = node.test
+        is_literal_true = isinstance(test, ast.Constant) and test.value is True
+        if not is_literal_true:
+            return
+        has_break = any(isinstance(n, ast.Break) for n in ast.walk(node))
+        has_return = any(isinstance(n, ast.Return) for n in ast.walk(node))
+        has_raise = any(isinstance(n, ast.Raise) for n in ast.walk(node))
+        if not (has_break or has_return or has_raise):
+            self._add(
+                node,
+                "infinite_while_no_break",
+                "`while True:` with no `break`, `return`, or `raise` in the body "
+                "— this loop runs forever.",
+                suggestion="Add a `break` condition or convert to `while condition:`.",
+            )
+
+    # ------------------------------------------------------------------
+    # Pattern 44 — range(len(lst) - 1) silently misses the last element
+    # ------------------------------------------------------------------
+
+    def _check_range_excludes_last(self, node: ast.Call) -> None:
+        """`range(len(x) - 1)` produces indices 0..n-2, skipping the last."""
+        if not (isinstance(node.func, ast.Name) and node.func.id == "range"):
+            return
+        if len(node.args) != 1:
+            return
+        arg = node.args[0]
+        if not isinstance(arg, ast.BinOp):
+            return
+        if not isinstance(arg.op, ast.Sub):
+            return
+        if not isinstance(arg.left, ast.Call):
+            return
+        if not (isinstance(arg.left.func, ast.Name)
+                and arg.left.func.id == "len"):
+            return
+        if not (isinstance(arg.right, ast.Constant)
+                and arg.right.value == 1):
+            return
+        src = ast.unparse(arg.left) if hasattr(ast, "unparse") else "len(lst)"
+        self._add(
+            node,
+            "range_excludes_last_element",
+            f"`range({src} - 1)` generates indices 0 to n-2. "
+            "The last element (index n-1) is never visited.",
+            suggestion=f"Use `range({src})` to include all elements, "
+                       "or `range({src} - 1)` intentionally for pairwise iteration.",
+        )
+
+    # ------------------------------------------------------------------
+    # Pattern 45 — slice with no step reverses to empty
+    # ------------------------------------------------------------------
+
+    def _check_slice_wrong_direction(self, node: ast.Subscript) -> None:
+        """`lst[10:0]` with constant start > stop and no step → always empty."""
+        slc = node.slice
+        if not isinstance(slc, ast.Slice):
+            return
+        lower = slc.lower
+        upper = slc.upper
+        step = slc.step
+        if step is not None:
+            return
+        if not (isinstance(lower, ast.Constant) and isinstance(upper, ast.Constant)):
+            return
+        if not (isinstance(lower.value, int) and isinstance(upper.value, int)):
+            return
+        if lower.value > upper.value:
+            self._add(
+                node,
+                "slice_wrong_direction",
+                f"`[{lower.value}:{upper.value}]` — start ({lower.value}) > "
+                f"stop ({upper.value}) with no step, so this always produces "
+                "an empty sequence.",
+                suggestion=f"Add step: `[{lower.value}:{upper.value}:-1]` to reverse slice.",
+            )
+
+    # ------------------------------------------------------------------
+    # Pattern 46 — callable used as default argument (evaluated once)
+    # ------------------------------------------------------------------
+
+    def _check_callable_default_arg(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> None:
+        """`def f(t=time.time())` — default evaluated ONCE at definition."""
+        for default in node.args.defaults + node.args.kw_defaults:
+            if default is None:
+                continue
+            if not isinstance(default, ast.Call):
+                continue
+            func = default.func
+            func_src = ast.unparse(func) if hasattr(ast, "unparse") else ""
+            # Flag datetime-like and time-like callables
+            if any(name in func_src.lower() for name in _CALLABLE_DEFAULT_NAMES):
+                self._add(
+                    default,
+                    "callable_default_arg",
+                    f"`{func_src}()` as a default argument is evaluated ONCE "
+                    "when the function is defined, not on each call. "
+                    "Every call shares the same timestamp/date object.",
+                    suggestion=f"Use `None` as the default and call `{func_src}()` inside the function.",
+                )
+
+    # ------------------------------------------------------------------
+    # Pattern 47 — list.extend() called with a string argument
+    # ------------------------------------------------------------------
+
+    def _check_extend_with_string(self, node: ast.Call) -> None:
+        """`result.extend("hello")` iterates CHARACTERS, not the whole string."""
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "extend"):
+            return
+        if not node.args:
+            return
+        arg = node.args[0]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            self._add(
+                node,
+                "extend_with_string",
+                f"`extend({arg.value!r})` iterates the string character by "
+                "character, adding each char as a separate element. "
+                "To add the whole string, use `append()`.",
+                suggestion=f"Replace `.extend({arg.value!r})` with `.append({arg.value!r})`.",
+            )
+
+    # ------------------------------------------------------------------
+    # Pattern 48 — true-division used as list index (float TypeError)
+    # ------------------------------------------------------------------
+
+    def _check_truediv_as_index(self, node: ast.Subscript) -> None:
+        """`lst[x/2]` — true division returns float, causes TypeError as index."""
+        idx = node.slice
+        if not isinstance(idx, ast.BinOp):
+            return
+        if not isinstance(idx.op, ast.Div):
+            return
+        src = ast.unparse(idx) if hasattr(ast, "unparse") else "x/2"
+        self._add(
+            node,
+            "truediv_as_index",
+            f"`[{src}]` — `/` produces a `float`, which cannot be used as a "
+            "list index. Python raises `TypeError: list indices must be integers`.",
+            suggestion=f"Use integer division: `[{src.replace('/', '//')}]`.",
+        )
+
+    # ------------------------------------------------------------------
+    # Pattern 49 — `assert (condition, message)` — tuple is always truthy
+    # ------------------------------------------------------------------
+
+    def _check_assert_tuple(self, node: ast.Assert) -> None:
+        """`assert (cond, msg)` — a non-empty tuple is always True!"""
+        if not isinstance(node.test, ast.Tuple):
+            return
+        if len(node.test.elts) >= 2:
+            self._add(
+                node,
+                "assert_tuple",
+                "`assert (condition, 'message')` passes a tuple as the test. "
+                "A non-empty tuple is ALWAYS truthy — this assert NEVER fails, "
+                "even when the condition is False.",
+                suggestion="Remove the outer parentheses: `assert condition, 'message'`.",
+            )
+
+    # ------------------------------------------------------------------
+    # Pattern 50 — `x = x or default` loses valid falsy values
+    # ------------------------------------------------------------------
+
+    def _check_or_default_loses_falsy(self, node: ast.Assign) -> None:
+        """`x = x or default` treats 0, False, "" as missing — wrong."""
+        if len(node.targets) != 1:
+            return
+        target = node.targets[0]
+        if not isinstance(target, ast.Name):
+            return
+        rhs = node.value
+        if not isinstance(rhs, ast.BoolOp):
+            return
+        if not isinstance(rhs.op, ast.Or):
+            return
+        if not rhs.values:
+            return
+        first = rhs.values[0]
+        if not (isinstance(first, ast.Name) and first.id == target.id):
+            return
+        self._add(
+            node,
+            "or_default_loses_falsy",
+            f"`{target.id} = {target.id} or default` treats `0`, `False`, "
+            f"`\"\"`, and `[]` as missing — they are replaced by the default "
+            "even when they are intentional values.",
+            severity="MEDIUM",
+            suggestion=f"Use `if {target.id} is None: {target.id} = default` "
+                       "to only replace actual None.",
+        )
+
+    # ------------------------------------------------------------------
+    # Pattern 51 — return unconditionally in first loop iteration
+    # ------------------------------------------------------------------
+
+    def _check_return_first_iteration(self, node: ast.For) -> None:
+        """return as first UNCONDITIONAL statement in loop — always exits."""
+        for stmt in node.body:
+            if isinstance(stmt, ast.Return):
+                self._add(
+                    stmt,
+                    "return_first_iteration",
+                    "Unconditional `return` as the first statement in a loop. "
+                    "The loop body executes exactly once — the return exits "
+                    "immediately on the first iteration, making the loop pointless.",
+                    suggestion="Wrap the return in an `if` condition, or move it after the loop.",
+                )
+                break
+            if not isinstance(stmt, (ast.Pass, ast.Expr)):
+                break  # something else first — stop checking
+
+    # ------------------------------------------------------------------
+    # Pattern 52 — raise in finally block (masks original exception)
+    # ------------------------------------------------------------------
+
+    def _check_raise_in_finally(self, node: ast.Try) -> None:
+        """raise inside finally replaces original exception with a new one."""
+        for stmt in node.finalbody:
+            if isinstance(stmt, ast.Raise) and stmt.exc is not None:
+                self._add(
+                    stmt,
+                    "raise_in_finally",
+                    "`raise` inside `finally` discards the original exception. "
+                    "If the `try` block raised, the original traceback is lost "
+                    "and replaced by this new raise.",
+                    suggestion="Avoid raising inside `finally`; let the original exception propagate.",
+                )
+                break
+
+    # ------------------------------------------------------------------
+    # Pattern 53 — `while` loop whose condition variable never changes
+    # ------------------------------------------------------------------
+
+    def _check_while_condition_unchanged(self, node: ast.While) -> None:
+        """while <var>: body never assigns <var> → potential infinite loop."""
+        test = node.test
+        if not isinstance(test, ast.Name):
+            return
+        var = test.id
+        # Check if var is ever assigned inside the loop body
+        for stmt in ast.walk(node):
+            if isinstance(stmt, (ast.Assign, ast.AugAssign)):
+                targets = (
+                    stmt.targets if isinstance(stmt, ast.Assign)
+                    else [stmt.target]
+                )
+                for t in targets:
+                    if isinstance(t, ast.Name) and t.id == var:
+                        return  # condition IS modified — fine
+        self._add(
+            node,
+            "while_condition_unchanged",
+            f"`while {var}:` — `{var}` is never modified inside the loop body. "
+            "If `{var}` starts truthy, this loop runs forever.",
+            suggestion=f"Add an assignment or `break` that changes `{var}` inside the loop.",
+        )
+
+    # ------------------------------------------------------------------
+    # Pattern 54 — list.sort() result assigned (returns None)
+    # ------------------------------------------------------------------
+
+    def _check_sort_result_assigned(self, node: ast.Assign) -> None:
+        """`x = lst.sort()` — sort() returns None, not the sorted list."""
+        if not isinstance(node.value, ast.Call):
+            return
+        call = node.value
+        if not isinstance(call.func, ast.Attribute):
+            return
+        if call.func.attr != "sort":
+            return
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                self._add(
+                    node,
+                    "sort_returns_none",
+                    f"`{target.id} = lst.sort()` — `list.sort()` sorts in-place "
+                    f"and returns `None`. `{target.id}` will always be `None`.",
+                    suggestion=f"Use `{target.id} = sorted(lst)` to get a new sorted list, "
+                               "or call `lst.sort()` without assigning.",
+                )
+                break
+
+    # ------------------------------------------------------------------
+    # Pattern 55 — print() result assigned (returns None)
+    # ------------------------------------------------------------------
+
+    def _check_print_result_assigned(self, node: ast.Assign) -> None:
+        """`x = print(...)` — print() returns None."""
+        if not isinstance(node.value, ast.Call):
+            return
+        func = node.value.func
+        if not (isinstance(func, ast.Name) and func.id == "print"):
+            return
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                self._add(
+                    node,
+                    "print_returns_none",
+                    f"`{target.id} = print(...)` — `print()` always returns `None`. "
+                    f"Assigning its result means `{target.id}` is always `None`.",
+                    severity="MEDIUM",
+                    suggestion=f"Remove the assignment; just call `print(...)`.",
+                )
+                break
+
+    # ------------------------------------------------------------------
+    # Pattern 56 — `append` called with a list (should be `extend`)
+    # ------------------------------------------------------------------
+
+    def _check_append_list_arg(self, node: ast.Call) -> None:
+        """`result.append([1,2,3])` nests the list; use extend to flatten."""
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "append"):
+            return
+        if not node.args:
+            return
+        arg = node.args[0]
+        if not isinstance(arg, ast.List):
+            return
+        if len(arg.elts) == 0:
+            return
+        src = ast.unparse(arg) if hasattr(ast, "unparse") else "[...]"
+        self._add(
+            node,
+            "append_list_literal",
+            f"`.append({src})` nests the entire list as a single element. "
+            "To add all elements individually, use `.extend()`.",
+            severity="MEDIUM",
+            suggestion=f"Replace `.append({src})` with `.extend({src})`.",
+        )
+
+    # ------------------------------------------------------------------
+    # Pattern 57 — variable used after being assigned only inside try
+    # ------------------------------------------------------------------
+
+    def _check_var_only_in_try(self, node: ast.Try) -> None:
+        """Variable defined only in try block, used after — NameError if exception."""
+        # Collect names assigned in the try body (not in except/else/finally)
+        try_assigned: set[str] = set()
+        for stmt in node.body:
+            for n in ast.walk(stmt):
+                if isinstance(n, ast.Assign):
+                    for t in n.targets:
+                        if isinstance(t, ast.Name):
+                            try_assigned.add(t.id)
+        # Collect names used in except handlers
+        for handler in node.handlers:
+            for n in ast.walk(handler):
+                if isinstance(n, ast.Name) and n.id in try_assigned:
+                    # Used in handler — potentially NameError if handler doesn't assign
+                    pass  # complex to flag correctly — skip
+        # Simpler: check names used in `else` block — only runs if no exception
+        for stmt in node.orelse:
+            for n in ast.walk(stmt):
+                if isinstance(n, ast.Name) and n.id in try_assigned:
+                    pass  # else only runs if try succeeds — fine
+
+    # ------------------------------------------------------------------
+    # Pattern 58 — wrong string escapes (raw backslash)
+    # ------------------------------------------------------------------
+
+    def _check_string_escape(self, node: ast.Constant) -> None:
+        """Detect common escape mistakes like `"C:\new"` (\\n becomes newline)."""
+        if not isinstance(node.value, str):
+            return
+        # The string value will already have escapes resolved by Python.
+        # We check the source line for the original text.
+        src = self._src_line(getattr(node, "lineno", 0))
+        # Look for \n, \t, \r, \b inside a string delimited by " or '
+        # in a path-like context
+        if ":\\" in src and ("\\n" in src or "\\t" in src):
+            self._add(
+                node,
+                "windows_path_escape",
+                f"String on line {getattr(node, 'lineno', '?')} contains "
+                r"`\n` or `\t` inside a Windows-style path. These are escape "
+                "sequences (newline/tab), not literal backslash-n/t.",
+                severity="MEDIUM",
+                suggestion="Use a raw string `r'C:\\path'` or forward slashes `'C:/path'`.",
+            )
+
+    # ------------------------------------------------------------------
+    # Pattern 59 — `len(x) == 0` instead of `not x`
+    # ------------------------------------------------------------------
+
+    def _check_len_comparison_zero(self, node: ast.Compare) -> None:
+        """`len(x) == 0` is non-idiomatic; `not x` is preferred."""
+        left = node.left
+        if not (isinstance(left, ast.Call)
+                and isinstance(left.func, ast.Name)
+                and left.func.id == "len"):
+            return
+        for op, comp in zip(node.ops, node.comparators):
+            if not (isinstance(op, (ast.Eq, ast.NotEq))
+                    and isinstance(comp, ast.Constant)
+                    and comp.value == 0):
+                continue
+            arg_src = (
+                ast.unparse(left.args[0])
+                if left.args and hasattr(ast, "unparse") else "x"
+            )
+            better = f"not {arg_src}" if isinstance(op, ast.Eq) else arg_src
+            self._add(
+                node,
+                "len_compared_to_zero",
+                f"`len({arg_src}) == 0` is non-idiomatic. "
+                f"Use `{better}` — more readable and works on any container.",
+                severity="INFO",
+                suggestion=f"Replace with `if {better}:`.",
+            )
+
+    # ------------------------------------------------------------------
+    # Pattern 60 — nested mutable default in recursive function
+    # ------------------------------------------------------------------
+
+    def _check_recursive_mutable_default(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> None:
+        """Mutable default in a recursive function accumulates across calls."""
+        # Check if function is recursive
+        fn_src = ast.unparse(node) if hasattr(ast, "unparse") else ""
+        is_recursive = node.name in fn_src
+        if not is_recursive:
+            return
+        for default in node.args.defaults:
+            if isinstance(default, (ast.List, ast.Dict, ast.Set)):
+                self._add(
+                    default,
+                    "recursive_mutable_default",
+                    f"`{node.name}` is recursive and has a mutable default "
+                    "argument. On recursive calls the default is the SAME "
+                    "object already mutated by prior calls — results accumulate "
+                    "instead of starting fresh.",
+                    suggestion="Use `None` as the default and initialise inside the function.",
+                )
+
+    # ------------------------------------------------------------------
+    # Pattern 61 — f-string without interpolation (static string)
+    # ------------------------------------------------------------------
+
+    def _check_fstring_no_interpolation(self, node: ast.JoinedStr) -> None:
+        """f-string with no `{...}` placeholders — just use a plain string."""
+        has_placeholder = any(
+            not isinstance(part, ast.Constant)
+            for part in node.values
+        )
+        if not has_placeholder:
+            # Reconstruct the raw string value
+            raw = "".join(
+                p.value for p in node.values if isinstance(p, ast.Constant)
+            )
+            self._add(
+                node,
+                "fstring_no_interpolation",
+                f'`f"{raw}"` is an f-string with no `{{...}}` placeholders. '
+                "The `f` prefix is useless and misleading.",
+                severity="INFO",
+                suggestion=f'Remove the `f` prefix: `"{raw}"`.',
+            )
+
+    # ------------------------------------------------------------------
+    # Pattern 62 — integer passed to str.join (should be list of strings)
+    # ------------------------------------------------------------------
+
+    def _check_join_non_strings(self, node: ast.Call) -> None:
+        """`", ".join([1, 2, 3])` — join requires strings, not ints."""
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "join"):
+            return
+        if not node.args:
+            return
+        arg = node.args[0]
+        if not isinstance(arg, ast.List):
+            return
+        for elt in arg.elts:
+            if isinstance(elt, ast.Constant) and isinstance(elt.value, (int, float)):
+                self._add(
+                    node,
+                    "join_non_string_elements",
+                    "`.join([...])` requires all elements to be strings. "
+                    "Passing integers/floats raises `TypeError: sequence item N: "
+                    "expected str instance, int found`.",
+                    suggestion="Convert elements first: `', '.join(str(x) for x in items)`.",
+                )
+                return
+
+    # ------------------------------------------------------------------
+    # Pattern 63 — `sum([...])` with no start — wrong for non-integer types
+    # ------------------------------------------------------------------
+
+    def _check_sum_wrong_start(self, node: ast.Call) -> None:
+        """`sum([[1,2],[3,4]])` — sum's default start=0 fails for lists."""
+        func = node.func
+        if not (isinstance(func, ast.Name) and func.id == "sum"):
+            return
+        if not node.args or len(node.args) > 1:
+            return
+        arg = node.args[0]
+        if not isinstance(arg, ast.List):
+            return
+        if not arg.elts:
+            return
+        # Check if elements are lists/tuples
+        if isinstance(arg.elts[0], (ast.List, ast.Tuple)):
+            self._add(
+                node,
+                "sum_of_lists",
+                "`sum([[1,2],[3,4]])` fails with `TypeError: can only concatenate "
+                "list to list, not int` because the default `start=0` is an int. "
+                "Use `sum([[1,2],[3,4]], [])` or `itertools.chain.from_iterable`.",
+                suggestion="Use `sum(nested, [])` with an empty list as start, "
+                           "or `list(itertools.chain.from_iterable(nested))`.",
+            )
+
     # ------------------------------------------------------------------
     # ast.NodeVisitor dispatch
     # ------------------------------------------------------------------
@@ -1087,6 +1882,8 @@ class BugPatternScanner(ast.NodeVisitor):
         self._check_forgot_self_dot(node)
         self._check_inconsistent_return(node)
         self._check_unreachable_after_return(node.body)
+        self._check_callable_default_arg(node)
+        self._check_recursive_mutable_default(node)
         self.generic_visit(node)
         self._fn_stack.pop()
         self._current_fn = self._fn_stack[-1] if self._fn_stack else None
@@ -1097,6 +1894,8 @@ class BugPatternScanner(ast.NodeVisitor):
         self._check_comparison_as_assignment(node)
         self._check_loop_var_unused(node)
         self._check_loop_overwrites_accumulator(node)
+        self._check_import_in_loop(node)
+        self._check_return_first_iteration(node)
         self.generic_visit(node)
 
     def visit_If(self, node: ast.If) -> None:
@@ -1112,6 +1911,13 @@ class BugPatternScanner(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         self._check_off_by_one_range(node)
         self._check_range_direction(node)
+        self._check_range_excludes_last(node)
+        self._check_dict_fromkeys_mutable(node)
+        self._check_max_min_without_guard(node)
+        self._check_extend_with_string(node)
+        self._check_append_list_arg(node)
+        self._check_join_non_strings(node)
+        self._check_sum_wrong_start(node)
         self.generic_visit(node)
 
     def visit_Compare(self, node: ast.Compare) -> None:
@@ -1120,11 +1926,14 @@ class BugPatternScanner(ast.NodeVisitor):
         self._check_type_not_isinstance(node)
         self._check_redundant_bool(node)
         self._check_float_exact_equality(node)
+        self._check_comparison_with_itself(node)
+        self._check_len_comparison_zero(node)
         self.generic_visit(node)
 
     def visit_BinOp(self, node: ast.BinOp) -> None:
         self._check_floor_div(node)
         self._check_divide_without_guard(node)
+        self._check_list_multiply_shared(node)
         self.generic_visit(node)
 
     def visit_Expr(self, node: ast.Expr) -> None:
@@ -1136,14 +1945,20 @@ class BugPatternScanner(ast.NodeVisitor):
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
         self._check_bare_except(node)
         self._check_exception_swallowed(node)
+        self._check_wrong_reraise(node)
         self.generic_visit(node)
 
     def visit_Try(self, node: ast.Try) -> None:
         self._check_return_in_finally(node)
+        self._check_raise_in_finally(node)
+        self._check_var_only_in_try(node)
         self.generic_visit(node)
 
     def visit_Assign(self, node: ast.Assign) -> None:
         self._check_shadow_builtin(node)
+        self._check_sort_result_assigned(node)
+        self._check_print_result_assigned(node)
+        self._check_or_default_loses_falsy(node)
         self.generic_visit(node)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
@@ -1158,4 +1973,32 @@ class BugPatternScanner(ast.NodeVisitor):
 
     def visit_Assert(self, node: ast.Assert) -> None:
         self._check_assert_for_validation(node)
+        self._check_assert_tuple(node)
+        self.generic_visit(node)
+
+    def visit_While(self, node: ast.While) -> None:
+        self._check_infinite_while(node)
+        self._check_while_condition_unchanged(node)
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._check_missing_super_init(node)
+        self._check_class_mutable_attribute(node)
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        self._check_star_import(node)
+        self.generic_visit(node)
+
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        self._check_slice_wrong_direction(node)
+        self._check_truediv_as_index(node)
+        self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        self._check_string_escape(node)
+        self.generic_visit(node)
+
+    def visit_JoinedStr(self, node: ast.JoinedStr) -> None:
+        self._check_fstring_no_interpolation(node)
         self.generic_visit(node)

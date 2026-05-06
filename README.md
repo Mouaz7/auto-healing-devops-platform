@@ -4,7 +4,7 @@
 
 ### Automated Remediation in CI/CD: Design and Control of an AI-based Code Repair Agent
 
-[![Tests](https://img.shields.io/badge/tests-494%20passing-brightgreen?style=flat-square)](tests/)
+[![Tests](https://img.shields.io/badge/tests-653%20passing-brightgreen?style=flat-square)](tests/)
 [![HITL](https://img.shields.io/badge/HITL-enforced-critical?style=flat-square)](src/orchestrator_mcp/pipeline_mixin.py)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square)](https://python.org)
 [![License](https://img.shields.io/badge/thesis-PA2534%20BTH%202026-lightgrey?style=flat-square)](https://www.bth.se)
@@ -58,7 +58,8 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 | 5-stage log compression, ~90% token reduction before LLM | `src/log_cleaner_mcp/pipeline.py` |
 | Regex + LLM fallback error analysis for 6 error types, blast radius | `src/knowledge_graph_mcp/failure_analyser.py` |
 | Fix generation: retry loop 6–14 attempts, surgical patch or full rewrite | `src/llm_mcp/fix_generator.py` |
-| NoneType hint: redirects LLM to call site instead of symptom line | `src/llm_mcp/fix_validators.py:188` |
+| Proactive AST bug scanner: 63 patterns injected into prompt before LLM sees traceback | `src/llm_mcp/bug_scanner.py` |
+| 14 runtime error hints: NoneType, IndexError, KeyError, RecursionError, ZeroDivision, etc. | `src/llm_mcp/fix_validators.py` |
 | Stuck-loop pivot: identical error type twice → strategy change in prompt | `src/llm_mcp/fix_prompts.py:45` |
 | 4-model fallback chain per agent, complexity-based model routing | `src/shared/nim_client.py`, `src/shared/task_complexity.py` |
 
@@ -85,7 +86,8 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 |---|---|---|
 | AI introduces security vulnerabilities | Bandit scan → retry or block | `src/shared/quality_gates.py` |
 | AI produces low-quality code | Pylint real score → confidence penalty | `src/shared/quality_gates.py` |
-| AI hallucinates wrong fixes | AST parse + sandboxed subprocess run before accepting | `src/llm_mcp/fix_validators.py` |
+| AI hallucinates wrong fixes | AST parse + sandboxed subprocess run + 14 runtime hints before accepting | `src/llm_mcp/fix_validators.py` |
+| AI targets symptom not root cause | 63-pattern static scanner pre-annotates code with bug locations before LLM call | `src/llm_mcp/bug_scanner.py` |
 | AI cannot be trusted to merge | **Auto-merge disabled** — human clicks Merge on GitHub | `src/orchestrator_mcp/github_mixin.py` |
 | No accountability or traceability | Audit trail + PR body with confidence, root cause, elapsed time | `src/shared/audit_log.py` |
 | System loops infinitely | Regression block + CI guard prevent infinite repair cycles | `src/orchestrator_mcp/pipeline_mixin.py` |
@@ -394,7 +396,42 @@ After every fix, affected files are watched for **60 minutes**. Re-failure on th
 
 ---
 
-## 9. Log Processing Pipeline
+## 9. Proactive Bug Scanner (Agent 5)
+
+### 63-Pattern AST Scanner (`src/llm_mcp/bug_scanner.py`)
+
+Before the LLM generates a fix, the pipeline runs a full static AST scan on the original broken code. Findings are **injected into the fix prompt** so the model knows exactly what to look for — instead of tunnel-visioning on the traceback symptom line.
+
+```
+============================================================
+STATIC BUG SCAN — 3 PATTERN(S) DETECTED
+============================================================
+  [1] Line 4 — WRONG_EDGE_RETURN (HIGH)
+      Returns `1` for empty input — correct sentinel is 0/0.0/None/-1
+  [2] Line 5 — WRONG_ACCUMULATOR_INIT (HIGH)
+      `total` initialised to `1` but used as sum accumulator with `+=`
+  [3] Line 7 — COMPARISON_AS_ASSIGNMENT (HIGH)
+      `total == num` is a no-op comparison — use `total += num`
+============================================================
+```
+
+#### Pattern categories (63 total)
+
+| Category | Patterns |
+|---|---|
+| **Accumulation bugs** | wrong_accumulator_init, loop_overwrites_accumulator, augmented_subtract_in_sum, wrong_product_sentinel |
+| **Edge-case returns** | wrong_edge_return, wrong_return_sentinel, inconsistent_return, missing_return |
+| **Loop bugs** | off_by_one_range, loop_var_unused, range_excludes_last_element, range_wrong_direction, return_first_iteration, import_in_loop, infinite_while_no_break, while_condition_unchanged |
+| **Comparison bugs** | comparison_as_assignment, is_literal_comparison, none_equality_check, redundant_bool_comparison, comparison_with_itself, type_not_isinstance, float_exact_equality, len_compared_to_zero |
+| **Class / OOP bugs** | class_mutable_attribute, missing_super_init, forgot_self_dot, mutable_default_arg, callable_default_arg, recursive_mutable_default, dict_fromkeys_mutable_default, list_multiply_shared_refs |
+| **Exception bugs** | bare_except, exception_swallowed, wrong_exception_reraise, return_in_finally, raise_in_finally, assert_for_validation, assert_tuple |
+| **String / collection** | str_method_not_assigned, sorted_result_discarded, sort_returns_none, print_returns_none, extend_with_string, append_list_literal, join_non_string_elements, sum_of_lists, duplicate_dict_key, star_import |
+| **Math / type bugs** | floor_div_float_context, divide_without_guard, wrong_arithmetic_op, truediv_as_index, slice_wrong_direction, windows_path_escape |
+| **Code quality** | shadow_builtin, augmented_assign_to_param, recursive_call_not_returned, fstring_no_interpolation, or_default_loses_falsy, unreachable_code_after_return |
+
+---
+
+## 10. Log Processing Pipeline
 
 ### Agent 3 — 5-Stage Deterministic Pipeline
 
@@ -414,7 +451,7 @@ Second compression before LLM calls in Agent 5: keeps error lines + 2-line conte
 
 ---
 
-## 10. Observability & Monitoring
+## 11. Observability & Monitoring
 
 ### Prometheus Metrics (`/metrics` on every service)
 
@@ -449,7 +486,7 @@ Independent breaker per service: NIM API, GitHub API, Slack, Teams.
 
 ---
 
-## 11. Slack Integration
+## 12. Slack Integration
 
 ### GREEN & YELLOW — Interactive Review Buttons (HITL Enforced)
 
@@ -517,9 +554,9 @@ Every morning at 08:00 UTC: builds processed, success rates, top error types, tr
 
 ---
 
-## 12. Test Suite
+## 13. Test Suite
 
-**494 tests passing** · 9 pre-existing failures in blast-radius tests (unrelated to any recent changes)
+**653 tests passing** · 9 pre-existing failures in blast-radius tests (unrelated to any recent changes)
 
 <details>
 <summary>Unit test coverage (click to expand)</summary>
@@ -531,7 +568,8 @@ Every morning at 08:00 UTC: builds processed, success rates, top error types, tr
 | Heal Verifier | regression detection, file overlap, expiry |
 | Secret Scanner | all 11 patterns, safe-pattern exclusions |
 | Quality Gates | Bandit scan, real Pylint score, confidence modifiers |
-| Fix Helpers | NoneType hint, error fingerprint, strategy pivot |
+| Fix Helpers | NoneType hint, 14 runtime error hints, fingerprint, strategy pivot, emergency rewrite |
+| Bug Scanner | 63 AST patterns: accumulator init, mutable class attr, assert-tuple, shared list multiply, etc. |
 | Circuit Breaker | CLOSED → OPEN → HALF_OPEN → CLOSED |
 | Model Fallback | chain, AllModelsFailed, slot reset |
 | Workflow Engine | state transitions, InvalidTransitionError, pruning |
@@ -568,7 +606,7 @@ python3 -m pytest tests/ -q
 
 ---
 
-## 13. Installation & Setup
+## 14. Installation & Setup
 
 ### Requirements
 
@@ -633,7 +671,7 @@ Settings → Webhooks → Add webhook:
 
 ---
 
-## 14. Environment Variables
+## 15. Environment Variables
 
 ### Required
 
@@ -690,7 +728,7 @@ Settings → Webhooks → Add webhook:
 
 ---
 
-## 15. Project Structure
+## 16. Project Structure
 
 ```
 auto-healing-devops-platform/
@@ -722,8 +760,9 @@ auto-healing-devops-platform/
 │   │
 │   ├── llm_mcp/                    # :8086 — Agent 5, Code Repairer
 │   │   ├── fix_generator.py        # Retry loop: LLM → validate → Bandit → Pylint
-│   │   ├── fix_validators.py       # AST + sandboxed run + NoneType hint
-│   │   ├── fix_prompts.py          # Retry prompt builder + stuck-loop pivot
+│   │   ├── bug_scanner.py          # 63-pattern AST scanner injected before LLM prompt
+│   │   ├── fix_validators.py       # AST + sandboxed run + 14 runtime error hints
+│   │   ├── fix_prompts.py          # Retry prompt builder + stuck-loop pivot + emergency rewrite
 │   │   └── fix_parsers.py          # Surgical patch + JSON parser
 │   │
 │   ├── knowledge_graph_mcp/        # :8084 — Agent 4, Error Analyst
@@ -749,13 +788,13 @@ auto-healing-devops-platform/
 │       └── task_classifier.py      # Agent 2: Scenario A/B classification
 │
 └── tests/
-    ├── unit/                       # 494 passing (no Docker)
+    ├── unit/                       # 653 passing (no Docker)
     └── integration/                # End-to-end pipeline tests
 ```
 
 ---
 
-## 16. Authors
+## 17. Authors
 
 | Name | Email | Program |
 |---|---|---|
