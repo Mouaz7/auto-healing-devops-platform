@@ -5,26 +5,40 @@ specific bug patterns at the AST level. Findings are injected into the fix
 prompt so the LLM knows exactly what to look for — instead of relying on the
 traceback line which often points at the symptom, not the root cause.
 
-Detected patterns (18):
-  1.  comparison_as_assignment   total == num in loop body (should be +=)
-  2.  wrong_edge_return          if not x: return 1 (non-zero/non-None sentinel)
-  3.  wrong_arithmetic_op        total - len(x) in average/mean function
-  4.  off_by_one_range           range(len(x) + 1) or range(1, len(x)+1)
-  5.  mutable_default_arg        def f(x, lst=[]) — shared across calls
-  6.  missing_return             function branches that fall through → None
-  7.  is_literal_comparison      if x is 5 / if x is "str" (use ==)
-  8.  floor_div_float_context    total // n in mean/average/ratio function
-  9.  loop_var_unused            for i in range(n): body never references i
-  10. divide_without_guard       x / y where y is len(...) or param without check
-  11. recursive_call_not_returned self.next.find(x) without return keyword
-  12. wrong_range_direction      range(n, 0) missing step=-1
-  13. bare_except                except: catches KeyboardInterrupt/SystemExit
-  14. return_in_finally          return inside finally masks exceptions
-  15. wrong_return_sentinel      return -2 in search function (should be -1)
-  16. str_method_not_assigned    s.replace(...) result discarded (strings immutable)
-  17. shadow_builtin             list = [...] / dict = {...} shadows builtin
-  18. augmented_assign_to_param  total += item when total is a function parameter
-                                 with no default (may be int or None)
+Detected patterns (33):
+  1.  comparison_as_assignment      total == num in loop body (should be +=)
+  2.  wrong_edge_return             if not x: return 1 (non-zero/non-None sentinel)
+  3.  wrong_arithmetic_op           total - len(x) in average/mean function
+  4.  off_by_one_range              range(len(x) + 1) or range(1, len(x)+1)
+  5.  mutable_default_arg           def f(x, lst=[]) — shared across calls
+  6.  missing_return                function branches that fall through → None
+  7.  is_literal_comparison         if x is 5 / if x is "str" (use ==)
+  8.  floor_div_float_context       total // n in mean/average/ratio function
+  9.  loop_var_unused               for i in range(n): body never references i
+  10. divide_without_guard          x / y where y is len(...) or param without check
+  11. recursive_call_not_returned   self.next.find(x) without return keyword
+  12. wrong_range_direction         range(n, 0) missing step=-1
+  13. bare_except                   except: catches KeyboardInterrupt/SystemExit
+  14. return_in_finally             return inside finally masks exceptions
+  15. wrong_return_sentinel         return -2 in search function (should be -1)
+  16. str_method_not_assigned       s.replace(...) result discarded (strings immutable)
+  17. shadow_builtin                list = [...] / dict = {...} shadows builtin
+  18. augmented_assign_to_param     total += item when total is a required parameter
+  19. wrong_accumulator_init        total = 1 before a loop that uses total +=
+  20. loop_overwrites_accumulator   total = num (plain =) instead of total += num
+  21. none_equality_check           x == None should be x is None
+  22. type_not_isinstance           type(x) == list fails for subclasses
+  23. exception_swallowed           except SomeError: pass hides bugs silently
+  24. unreachable_code_after_return statements after an unconditional return
+  25. sorted_result_discarded       sorted(x) result thrown away (use x.sort())
+  26. redundant_bool_comparison     == True or == False (use bare truthy test)
+  27. augmented_subtract_in_sum     total -= num in average/sum function
+  28. forgot_self_dot               name = name in __init__ (should be self.name)
+  29. duplicate_dict_key            {'a': 1, 'a': 2} — second value silently wins
+  30. wrong_product_sentinel        product = 0 for multiplication (use 1)
+  31. float_exact_equality          x == 0.1 is unreliable (use math.isclose)
+  32. assert_for_validation         assert disabled with python -O in production
+  33. inconsistent_return           some paths return value, others return None
 """
 from __future__ import annotations
 
@@ -54,6 +68,19 @@ _STR_IMMUTABLE_METHODS = frozenset({
     "replace", "strip", "lstrip", "rstrip", "upper", "lower",
     "title", "capitalize", "removeprefix", "removesuffix",
     "center", "ljust", "rjust", "zfill", "encode",
+})
+
+_ACCUMULATOR_NAMES = frozenset({
+    "total", "sum", "count", "acc", "accumulator", "running",
+    "running_total", "subtotal",
+})
+
+_PRODUCT_NAMES = frozenset({
+    "product", "prod", "factorial", "multiply", "result",
+})
+
+_DISCARDABLE_BUILTINS = frozenset({
+    "sorted", "reversed", "list", "tuple", "set",
 })
 
 
@@ -610,6 +637,441 @@ class BugPatternScanner(ast.NodeVisitor):
             )
 
     # ------------------------------------------------------------------
+    # Pattern 19 — wrong accumulator initialisation (total = 1 before +=)
+    # ------------------------------------------------------------------
+
+    def _check_wrong_accumulator_init(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> None:
+        """Detect `total = 1` before a loop that uses `total +=`."""
+        # Collect top-level assignments to accumulator-named variables
+        inits: dict[str, tuple[ast.Assign, object]] = {}
+        for stmt in node.body:
+            if not isinstance(stmt, ast.Assign):
+                continue
+            for target in stmt.targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                name_lower = target.id.lower()
+                if not any(a in name_lower for a in _ACCUMULATOR_NAMES):
+                    continue
+                if not isinstance(stmt.value, ast.Constant):
+                    continue
+                if not isinstance(stmt.value.value, (int, float)):
+                    continue
+                if stmt.value.value not in (0, 0.0):
+                    inits[target.id] = (stmt, stmt.value.value)
+        if not inits:
+            return
+        # Confirm that the variable is used as an accumulator inside a loop:
+        # either via `+=` (AugAssign) or as the left operand in a standalone
+        # Compare (comparison_as_assignment — another bug we already flag).
+        for stmt in ast.walk(node):
+            if not isinstance(stmt, ast.For):
+                continue
+            for inner in ast.walk(stmt):
+                matched_var: str | None = None
+                if (isinstance(inner, ast.AugAssign)
+                        and isinstance(inner.op, ast.Add)
+                        and isinstance(inner.target, ast.Name)
+                        and inner.target.id in inits):
+                    matched_var = inner.target.id
+                elif (isinstance(inner, ast.Expr)
+                      and isinstance(inner.value, ast.Compare)
+                      and isinstance(inner.value.left, ast.Name)
+                      and inner.value.left.id in inits):
+                    matched_var = inner.value.left.id
+                if matched_var is None:
+                    continue
+                orig, val = inits[matched_var]
+                self._add(
+                    orig,
+                    "wrong_accumulator_init",
+                    f"`{matched_var}` is initialized to `{val}` but used "
+                    "as a sum accumulator. For a sum, the initial value should "
+                    f"be `0`. Starting at `{val}` adds an unwanted offset of "
+                    f"`{val}` to every result.",
+                    suggestion=f"Change `{matched_var} = {val}` to "
+                               f"`{matched_var} = 0`.",
+                )
+
+    # ------------------------------------------------------------------
+    # Pattern 20 — loop overwrites accumulator (total = num instead of +=)
+    # ------------------------------------------------------------------
+
+    def _check_loop_overwrites_accumulator(self, node: ast.For) -> None:
+        """Detect `total = num` (plain assignment) inside a for loop body."""
+        loop_var = node.target.id if isinstance(node.target, ast.Name) else None
+        for stmt in node.body:
+            if not isinstance(stmt, ast.Assign):
+                continue
+            for target in stmt.targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                name_lower = target.id.lower()
+                if not any(a in name_lower for a in _ACCUMULATOR_NAMES):
+                    continue
+                # Make sure the RHS is the loop variable (not a constant init)
+                rhs = stmt.value
+                rhs_uses_loop_var = (
+                    loop_var
+                    and isinstance(rhs, ast.Name)
+                    and rhs.id == loop_var
+                )
+                if not rhs_uses_loop_var:
+                    continue
+                src = self._src_line(stmt.lineno)
+                self._add(
+                    stmt,
+                    "loop_overwrites_accumulator",
+                    f"`{src}` — plain assignment inside a loop replaces the "
+                    "accumulated total on every iteration. Only the LAST item "
+                    "is kept when the loop finishes.",
+                    suggestion=f"Change `{target.id} = {loop_var}` to "
+                               f"`{target.id} += {loop_var}`.",
+                )
+
+    # ------------------------------------------------------------------
+    # Pattern 21 — `== None` (use `is None`)
+    # ------------------------------------------------------------------
+
+    def _check_none_equality(self, node: ast.Compare) -> None:
+        """Detect `x == None` — should be `x is None`."""
+        for op, comp in zip(node.ops, node.comparators):
+            if not isinstance(op, (ast.Eq, ast.NotEq)):
+                continue
+            if not (isinstance(comp, ast.Constant) and comp.value is None):
+                continue
+            eq = "==" if isinstance(op, ast.Eq) else "!="
+            better = "is" if isinstance(op, ast.Eq) else "is not"
+            self._add(
+                node,
+                "none_equality_check",
+                f"`{eq} None` compares by equality, which can be overridden "
+                "by `__eq__`. Use `{better} None` (identity check) — Python "
+                "convention and PEP 8.",
+                suggestion=f"Replace `{eq} None` with `{better} None`.",
+            )
+
+    # ------------------------------------------------------------------
+    # Pattern 22 — `type(x) == T` (use isinstance)
+    # ------------------------------------------------------------------
+
+    def _check_type_not_isinstance(self, node: ast.Compare) -> None:
+        """Detect `type(x) == list` — doesn't work with subclasses."""
+        left = node.left
+        if not (isinstance(left, ast.Call)
+                and isinstance(left.func, ast.Name)
+                and left.func.id == "type"):
+            return
+        for op in node.ops:
+            if not isinstance(op, (ast.Eq, ast.NotEq, ast.Is, ast.IsNot)):
+                continue
+            right = node.comparators[node.ops.index(op)]
+            right_src = ast.unparse(right) if hasattr(ast, "unparse") else "T"
+            arg_src = (ast.unparse(left.args[0])
+                       if left.args and hasattr(ast, "unparse") else "x")
+            self._add(
+                node,
+                "type_not_isinstance",
+                f"`type({arg_src}) == {right_src}` fails for subclasses. "
+                f"`isinstance({arg_src}, {right_src})` is the idiomatic check "
+                "and correctly handles inheritance.",
+                suggestion=f"Replace `type({arg_src}) == {right_src}` with "
+                           f"`isinstance({arg_src}, {right_src})`.",
+            )
+
+    # ------------------------------------------------------------------
+    # Pattern 23 — exception swallowed (except: pass)
+    # ------------------------------------------------------------------
+
+    def _check_exception_swallowed(self, node: ast.ExceptHandler) -> None:
+        """Detect `except ...: pass` — silently hides errors."""
+        if node.type is None:
+            return  # already caught by bare_except
+        real_stmts = [s for s in node.body if not isinstance(s, ast.Pass)]
+        if not real_stmts:
+            exc = ast.unparse(node.type) if hasattr(ast, "unparse") else "Exception"
+            self._add(
+                node,
+                "exception_swallowed",
+                f"`except {exc}: pass` silently discards the error. "
+                "Bugs that raise this exception are invisible in production.",
+                severity="MEDIUM",
+                suggestion="At minimum log it: `logging.exception('unexpected error')`",
+            )
+
+    # ------------------------------------------------------------------
+    # Pattern 24 — unreachable code after return
+    # ------------------------------------------------------------------
+
+    def _check_unreachable_after_return(
+        self, body: list[ast.stmt],
+    ) -> None:
+        """Detect statements that follow an unconditional return."""
+        for i, stmt in enumerate(body[:-1]):
+            if isinstance(stmt, ast.Return):
+                next_s = body[i + 1]
+                if isinstance(next_s, (ast.Pass, ast.Expr)) and isinstance(
+                    getattr(next_s, "value", None), ast.Constant
+                ):
+                    continue  # allow trailing docstring/pass
+                self._add(
+                    next_s,
+                    "unreachable_code_after_return",
+                    f"Line {getattr(next_s, 'lineno', '?')} is unreachable — "
+                    "it follows an unconditional `return`. This code never runs.",
+                    severity="MEDIUM",
+                    suggestion="Remove the unreachable statement or move it before the return.",
+                )
+                break
+
+    # ------------------------------------------------------------------
+    # Pattern 25 — sorted() result discarded
+    # ------------------------------------------------------------------
+
+    def _check_discardable_builtin_call(self, node: ast.Expr) -> None:
+        """Detect `sorted(x)` / `reversed(x)` used as a statement."""
+        if not isinstance(node.value, ast.Call):
+            return
+        func = node.value.func
+        if not (isinstance(func, ast.Name) and func.id in _DISCARDABLE_BUILTINS):
+            return
+        args = ", ".join(
+            ast.unparse(a) for a in node.value.args
+        ) if hasattr(ast, "unparse") else "..."
+        self._add(
+            node,
+            "sorted_result_discarded",
+            f"`{func.id}({args})` returns a new object but the result is "
+            "discarded. The original variable is unchanged.",
+            suggestion=f"Assign the result: `x = {func.id}({args})` "
+                       "or use `x.sort()` to sort in-place.",
+        )
+
+    # ------------------------------------------------------------------
+    # Pattern 26 — `== True` / `== False` redundant bool comparison
+    # ------------------------------------------------------------------
+
+    def _check_redundant_bool(self, node: ast.Compare) -> None:
+        """Detect `x == True` or `x == False`."""
+        for op, comp in zip(node.ops, node.comparators):
+            if not isinstance(op, ast.Eq):
+                continue
+            if not isinstance(comp, ast.Constant):
+                continue
+            if comp.value is True:
+                self._add(
+                    node,
+                    "redundant_bool_comparison",
+                    "`== True` is redundant and non-idiomatic. "
+                    "Use `if x:` instead of `if x == True:`.",
+                    severity="INFO",
+                    suggestion="Replace `== True` with a bare truthy test.",
+                )
+            elif comp.value is False:
+                self._add(
+                    node,
+                    "redundant_bool_comparison",
+                    "`== False` is redundant. "
+                    "Use `if not x:` instead of `if x == False:`.",
+                    severity="INFO",
+                    suggestion="Replace `== False` with `if not x:`.",
+                )
+
+    # ------------------------------------------------------------------
+    # Pattern 27 — `-=` accumulator in sum/average context
+    # ------------------------------------------------------------------
+
+    def _check_augmented_subtract_accumulation(self, node: ast.AugAssign) -> None:
+        """Detect `total -= num` in a float-context (average/mean) function."""
+        if not isinstance(node.op, ast.Sub):
+            return
+        if not self._fn_has_float_context():
+            return
+        if not isinstance(node.target, ast.Name):
+            return
+        name_lower = node.target.id.lower()
+        if not any(a in name_lower for a in _ACCUMULATOR_NAMES):
+            return
+        src = self._src_line(node.lineno)
+        self._add(
+            node,
+            "augmented_subtract_in_sum",
+            f"`{src}` subtracts from the accumulator inside a "
+            f"`{self._fn_name()}` function — this computes a running "
+            "difference, not a sum. The final average will be wrong.",
+            suggestion="Replace `-=` with `+=` to accumulate the sum.",
+        )
+
+    # ------------------------------------------------------------------
+    # Pattern 28 — forgot `self.` in __init__ (name = name)
+    # ------------------------------------------------------------------
+
+    def _check_forgot_self_dot(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> None:
+        """Detect `name = name` in __init__ — should be `self.name = name`."""
+        if node.name != "__init__":
+            return
+        params = {a.arg for a in node.args.args if a.arg != "self"}
+        for stmt in ast.walk(node):
+            if not isinstance(stmt, ast.Assign):
+                continue
+            for target in stmt.targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                if target.id not in params:
+                    continue
+                rhs = stmt.value
+                if not (isinstance(rhs, ast.Name) and rhs.id == target.id):
+                    continue
+                self._add(
+                    stmt,
+                    "forgot_self_dot",
+                    f"`{target.id} = {target.id}` assigns the parameter to a "
+                    "local variable, not the instance attribute. "
+                    "`self.{target.id}` is never set.",
+                    suggestion=f"Change `{target.id} = {target.id}` to "
+                               f"`self.{target.id} = {target.id}`.",
+                )
+
+    # ------------------------------------------------------------------
+    # Pattern 29 — duplicate key in dict literal
+    # ------------------------------------------------------------------
+
+    def _check_duplicate_dict_keys(self, node: ast.Dict) -> None:
+        """Detect `{'a': 1, 'a': 2}` — second value silently wins."""
+        seen: dict[object, int] = {}
+        for key in node.keys:
+            if key is None:
+                continue  # **unpacking — skip
+            if not isinstance(key, ast.Constant):
+                continue
+            k = key.value
+            if k in seen:
+                self._add(
+                    key,
+                    "duplicate_dict_key",
+                    f"Dict literal contains duplicate key `{k!r}`. "
+                    "The second value silently overwrites the first.",
+                    suggestion=f"Remove or rename one of the `{k!r}` keys.",
+                )
+            else:
+                seen[k] = key.lineno
+
+    # ------------------------------------------------------------------
+    # Pattern 30 — product accumulator initialised to 0
+    # ------------------------------------------------------------------
+
+    def _check_wrong_product_sentinel(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> None:
+        """Detect `product = 0` — multiplying by 0 always gives 0."""
+        for stmt in node.body:
+            if not isinstance(stmt, ast.Assign):
+                continue
+            for target in stmt.targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                name_lower = target.id.lower()
+                if not any(p in name_lower for p in _PRODUCT_NAMES):
+                    continue
+                if not (isinstance(stmt.value, ast.Constant)
+                        and stmt.value.value == 0):
+                    continue
+                # Confirm that it's used with *= somewhere
+                fn_src = ast.unparse(node) if hasattr(ast, "unparse") else ""
+                if "*=" not in fn_src:
+                    continue
+                self._add(
+                    stmt,
+                    "wrong_product_sentinel",
+                    f"`{target.id} = 0` — any number multiplied by 0 is 0. "
+                    "For a product/factorial accumulator, the identity element is `1`.",
+                    suggestion=f"Change `{target.id} = 0` to `{target.id} = 1`.",
+                )
+
+    # ------------------------------------------------------------------
+    # Pattern 31 — exact equality with float literal
+    # ------------------------------------------------------------------
+
+    def _check_float_exact_equality(self, node: ast.Compare) -> None:
+        """Detect `x == 0.1` — floats rarely compare exactly equal."""
+        for op, comp in zip(node.ops, node.comparators):
+            if not isinstance(op, (ast.Eq, ast.NotEq)):
+                continue
+            if not isinstance(comp, ast.Constant):
+                continue
+            val = comp.value
+            if not isinstance(val, float):
+                continue
+            if val in (0.0, 1.0, -1.0, 0.5):
+                continue  # safe round-trip values
+            eq = "==" if isinstance(op, ast.Eq) else "!="
+            self._add(
+                node,
+                "float_exact_equality",
+                f"`{eq} {val}` — floating-point arithmetic is inexact. "
+                f"`0.1 + 0.2 == 0.3` is `False` in Python. "
+                "Direct `==` comparison with most float literals is unreliable.",
+                severity="MEDIUM",
+                suggestion=f"Use `abs(x - {val}) < 1e-9` or `math.isclose(x, {val})`.",
+            )
+
+    # ------------------------------------------------------------------
+    # Pattern 32 — `assert` used for input validation
+    # ------------------------------------------------------------------
+
+    def _check_assert_for_validation(self, node: ast.Assert) -> None:
+        """Detect assert used to validate inputs — disabled with python -O."""
+        if not self._current_fn:
+            return
+        # Only flag asserts in the first 4 statements of a function body
+        fn_body = self._current_fn.body
+        top_level_asserts = [
+            s for s in fn_body[:4] if isinstance(s, ast.Assert)
+        ]
+        if node in top_level_asserts:
+            self._add(
+                node,
+                "assert_for_validation",
+                "`assert` is disabled when Python runs with `-O` (optimised mode). "
+                "Using `assert` for runtime input validation is unsafe in production.",
+                severity="MEDIUM",
+                suggestion="Replace `assert` with an explicit `if ... raise ValueError`.",
+            )
+
+    # ------------------------------------------------------------------
+    # Pattern 33 — inconsistent return (some paths return value, one returns None)
+    # ------------------------------------------------------------------
+
+    def _check_inconsistent_return(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> None:
+        """Detect functions where some branches return a value, others return None."""
+        returns_with_value: list[ast.Return] = []
+        bare_returns: list[ast.Return] = []
+        for n in ast.walk(node):
+            if not isinstance(n, ast.Return):
+                continue
+            if n.value is None or (isinstance(n.value, ast.Constant)
+                                   and n.value.value is None):
+                bare_returns.append(n)
+            else:
+                returns_with_value.append(n)
+        if returns_with_value and bare_returns:
+            self._add(
+                bare_returns[0],
+                "inconsistent_return",
+                f"`{node.name}` returns a value on some paths but `None` "
+                "(bare `return` or `return None`) on others. "
+                "Callers that use the return value will get unexpected `None`.",
+                severity="MEDIUM",
+                suggestion="Ensure every exit path returns an explicit value of the same type.",
+            )
+
+    # ------------------------------------------------------------------
     # ast.NodeVisitor dispatch
     # ------------------------------------------------------------------
 
@@ -620,6 +1082,11 @@ class BugPatternScanner(ast.NodeVisitor):
         self._current_fn = node
         self._check_mutable_default(node)
         self._check_missing_return(node)
+        self._check_wrong_accumulator_init(node)
+        self._check_wrong_product_sentinel(node)
+        self._check_forgot_self_dot(node)
+        self._check_inconsistent_return(node)
+        self._check_unreachable_after_return(node.body)
         self.generic_visit(node)
         self._fn_stack.pop()
         self._current_fn = self._fn_stack[-1] if self._fn_stack else None
@@ -629,6 +1096,7 @@ class BugPatternScanner(ast.NodeVisitor):
     def visit_For(self, node: ast.For) -> None:
         self._check_comparison_as_assignment(node)
         self._check_loop_var_unused(node)
+        self._check_loop_overwrites_accumulator(node)
         self.generic_visit(node)
 
     def visit_If(self, node: ast.If) -> None:
@@ -648,6 +1116,10 @@ class BugPatternScanner(ast.NodeVisitor):
 
     def visit_Compare(self, node: ast.Compare) -> None:
         self._check_is_literal(node)
+        self._check_none_equality(node)
+        self._check_type_not_isinstance(node)
+        self._check_redundant_bool(node)
+        self._check_float_exact_equality(node)
         self.generic_visit(node)
 
     def visit_BinOp(self, node: ast.BinOp) -> None:
@@ -658,10 +1130,12 @@ class BugPatternScanner(ast.NodeVisitor):
     def visit_Expr(self, node: ast.Expr) -> None:
         self._check_recursive_call_not_returned(node)
         self._check_str_method_discarded(node)
+        self._check_discardable_builtin_call(node)
         self.generic_visit(node)
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
         self._check_bare_except(node)
+        self._check_exception_swallowed(node)
         self.generic_visit(node)
 
     def visit_Try(self, node: ast.Try) -> None:
@@ -675,4 +1149,13 @@ class BugPatternScanner(ast.NodeVisitor):
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
         if self._current_fn:
             self._check_augmented_assign_to_param(node, self._current_fn)
+            self._check_augmented_subtract_accumulation(node)
+        self.generic_visit(node)
+
+    def visit_Dict(self, node: ast.Dict) -> None:
+        self._check_duplicate_dict_keys(node)
+        self.generic_visit(node)
+
+    def visit_Assert(self, node: ast.Assert) -> None:
+        self._check_assert_for_validation(node)
         self.generic_visit(node)

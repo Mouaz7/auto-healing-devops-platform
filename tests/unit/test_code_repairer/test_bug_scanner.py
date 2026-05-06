@@ -442,3 +442,336 @@ class TestScanResult:
         block = scan(code).to_prompt_block()
         assert "[1]" in block
         assert "[2]" in block
+
+
+# ---------------------------------------------------------------------------
+# Pattern 19 — wrong_accumulator_init
+# ---------------------------------------------------------------------------
+
+class TestWrongAccumulatorInit:
+    def test_detects_total_equals_one(self) -> None:
+        code = (
+            "def avg(nums):\n"
+            "    total = 1\n"
+            "    for n in nums:\n"
+            "        total += n\n"
+            "    return total / len(nums)\n"
+        )
+        assert "wrong_accumulator_init" in patterns(code)
+
+    def test_detects_with_comparison_in_loop(self) -> None:
+        # total = 1 and loop has total == n (double bug case)
+        code = (
+            "def avg(nums):\n"
+            "    total = 1\n"
+            "    for n in nums:\n"
+            "        total == n\n"
+            "    return total\n"
+        )
+        assert "wrong_accumulator_init" in patterns(code)
+
+    def test_total_zero_is_fine(self) -> None:
+        code = (
+            "def avg(nums):\n"
+            "    total = 0\n"
+            "    for n in nums:\n"
+            "        total += n\n"
+            "    return total / len(nums)\n"
+        )
+        assert "wrong_accumulator_init" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 20 — loop_overwrites_accumulator
+# ---------------------------------------------------------------------------
+
+class TestLoopOverwritesAccumulator:
+    def test_detects_total_equals_loop_var(self) -> None:
+        code = (
+            "def s(nums):\n"
+            "    total = 0\n"
+            "    for num in nums:\n"
+            "        total = num\n"
+            "    return total\n"
+        )
+        assert "loop_overwrites_accumulator" in patterns(code)
+
+    def test_augmented_assign_is_fine(self) -> None:
+        code = (
+            "def s(nums):\n"
+            "    total = 0\n"
+            "    for num in nums:\n"
+            "        total += num\n"
+            "    return total\n"
+        )
+        assert "loop_overwrites_accumulator" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 21 — none_equality_check
+# ---------------------------------------------------------------------------
+
+class TestNoneEqualityCheck:
+    def test_detects_eq_none(self) -> None:
+        code = "if x == None:\n    pass\n"
+        assert "none_equality_check" in patterns(code)
+
+    def test_detects_neq_none(self) -> None:
+        code = "if x != None:\n    pass\n"
+        assert "none_equality_check" in patterns(code)
+
+    def test_is_none_is_fine(self) -> None:
+        code = "if x is None:\n    pass\n"
+        assert "none_equality_check" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 22 — type_not_isinstance
+# ---------------------------------------------------------------------------
+
+class TestTypeNotIsinstance:
+    def test_detects_type_eq(self) -> None:
+        code = "if type(x) == list:\n    pass\n"
+        assert "type_not_isinstance" in patterns(code)
+
+    def test_isinstance_is_fine(self) -> None:
+        code = "if isinstance(x, list):\n    pass\n"
+        assert "type_not_isinstance" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 23 — exception_swallowed
+# ---------------------------------------------------------------------------
+
+class TestExceptionSwallowed:
+    def test_detects_except_pass(self) -> None:
+        code = (
+            "try:\n"
+            "    x = int(s)\n"
+            "except ValueError:\n"
+            "    pass\n"
+        )
+        assert "exception_swallowed" in patterns(code)
+
+    def test_except_with_log_is_fine(self) -> None:
+        code = (
+            "try:\n"
+            "    x = int(s)\n"
+            "except ValueError:\n"
+            "    x = -1\n"
+        )
+        assert "exception_swallowed" not in patterns(code)
+
+    def test_bare_except_not_double_flagged(self) -> None:
+        # bare_except fires; exception_swallowed should NOT also fire (no type)
+        code = (
+            "try:\n"
+            "    x = 1\n"
+            "except:\n"
+            "    pass\n"
+        )
+        hits = patterns(code)
+        assert "bare_except" in hits
+        assert "exception_swallowed" not in hits
+
+
+# ---------------------------------------------------------------------------
+# Pattern 24 — unreachable_code_after_return
+# ---------------------------------------------------------------------------
+
+class TestUnreachableAfterReturn:
+    def test_detects_statement_after_return(self) -> None:
+        code = (
+            "def f(x):\n"
+            "    return x\n"
+            "    y = x + 1\n"
+            "    return y\n"
+        )
+        assert "unreachable_code_after_return" in patterns(code)
+
+    def test_no_unreachable_in_branches(self) -> None:
+        code = (
+            "def f(x):\n"
+            "    if x > 0:\n"
+            "        return x\n"
+            "    return -x\n"
+        )
+        assert "unreachable_code_after_return" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 25 — sorted_result_discarded
+# ---------------------------------------------------------------------------
+
+class TestSortedResultDiscarded:
+    def test_detects_sorted_standalone(self) -> None:
+        code = "sorted(my_list)\n"
+        assert "sorted_result_discarded" in patterns(code)
+
+    def test_assigned_sorted_is_fine(self) -> None:
+        code = "my_list = sorted(my_list)\n"
+        assert "sorted_result_discarded" not in patterns(code)
+
+    def test_sort_method_is_fine(self) -> None:
+        code = "my_list.sort()\n"
+        assert "sorted_result_discarded" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 26 — redundant_bool_comparison
+# ---------------------------------------------------------------------------
+
+class TestRedundantBoolComparison:
+    def test_detects_eq_true(self) -> None:
+        code = "if x == True:\n    pass\n"
+        assert "redundant_bool_comparison" in patterns(code)
+
+    def test_detects_eq_false(self) -> None:
+        code = "if x == False:\n    pass\n"
+        assert "redundant_bool_comparison" in patterns(code)
+
+    def test_is_true_not_flagged(self) -> None:
+        code = "if x is True:\n    pass\n"
+        assert "redundant_bool_comparison" not in patterns(code)
+
+    def test_bare_if_is_fine(self) -> None:
+        code = "if x:\n    pass\n"
+        assert "redundant_bool_comparison" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 27 — augmented_subtract_in_sum
+# ---------------------------------------------------------------------------
+
+class TestAugmentedSubtractInSum:
+    def test_detects_minus_equals_in_average(self) -> None:
+        code = (
+            "def average(nums):\n"
+            "    total = 0.0\n"
+            "    for n in nums:\n"
+            "        total -= n\n"
+            "    return total / len(nums)\n"
+        )
+        assert "augmented_subtract_in_sum" in patterns(code)
+
+    def test_plus_equals_is_fine(self) -> None:
+        code = (
+            "def average(nums):\n"
+            "    total = 0.0\n"
+            "    for n in nums:\n"
+            "        total += n\n"
+            "    return total / len(nums)\n"
+        )
+        assert "augmented_subtract_in_sum" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 28 — forgot_self_dot
+# ---------------------------------------------------------------------------
+
+class TestForgotSelfDot:
+    def test_detects_name_eq_name_in_init(self) -> None:
+        code = (
+            "class Foo:\n"
+            "    def __init__(self, name):\n"
+            "        name = name\n"
+        )
+        assert "forgot_self_dot" in patterns(code)
+
+    def test_self_dot_is_fine(self) -> None:
+        code = (
+            "class Foo:\n"
+            "    def __init__(self, name):\n"
+            "        self.name = name\n"
+        )
+        assert "forgot_self_dot" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 29 — duplicate_dict_key
+# ---------------------------------------------------------------------------
+
+class TestDuplicateDictKey:
+    def test_detects_duplicate_string_key(self) -> None:
+        code = "d = {'a': 1, 'b': 2, 'a': 3}\n"
+        assert "duplicate_dict_key" in patterns(code)
+
+    def test_unique_keys_is_fine(self) -> None:
+        code = "d = {'a': 1, 'b': 2, 'c': 3}\n"
+        assert "duplicate_dict_key" not in patterns(code)
+
+    def test_detects_duplicate_integer_key(self) -> None:
+        code = "d = {1: 'one', 2: 'two', 1: 'ONE'}\n"
+        assert "duplicate_dict_key" in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 30 — wrong_product_sentinel
+# ---------------------------------------------------------------------------
+
+class TestWrongProductSentinel:
+    def test_detects_product_equals_zero(self) -> None:
+        code = (
+            "def multiply(nums):\n"
+            "    product = 0\n"
+            "    for n in nums:\n"
+            "        product *= n\n"
+            "    return product\n"
+        )
+        assert "wrong_product_sentinel" in patterns(code)
+
+    def test_product_one_is_fine(self) -> None:
+        code = (
+            "def multiply(nums):\n"
+            "    product = 1\n"
+            "    for n in nums:\n"
+            "        product *= n\n"
+            "    return product\n"
+        )
+        assert "wrong_product_sentinel" not in patterns(code)
+
+
+# ---------------------------------------------------------------------------
+# Pattern 31 — float_exact_equality
+# ---------------------------------------------------------------------------
+
+class TestFloatExactEquality:
+    def test_detects_eq_float_literal(self) -> None:
+        code = "if result == 0.1:\n    pass\n"
+        assert "float_exact_equality" in patterns(code)
+
+    def test_eq_zero_float_is_fine(self) -> None:
+        # 0.0 has exact float representation
+        code = "if x == 0.0:\n    pass\n"
+        assert "float_exact_equality" not in patterns(code)
+
+    def test_math_isclose_suggestion_in_block(self) -> None:
+        code = "if x == 0.3:\n    pass\n"
+        block = scan(code).to_prompt_block()
+        assert "isclose" in block or "1e-9" in block
+
+
+# ---------------------------------------------------------------------------
+# Pattern 33 — inconsistent_return
+# ---------------------------------------------------------------------------
+
+class TestInconsistentReturn:
+    def test_detects_mixed_returns(self) -> None:
+        code = (
+            "def find(lst, x):\n"
+            "    for i, v in enumerate(lst):\n"
+            "        if v == x:\n"
+            "            return i\n"
+            "    return\n"  # bare return — returns None
+        )
+        assert "inconsistent_return" in patterns(code)
+
+    def test_all_return_value_is_fine(self) -> None:
+        code = (
+            "def find(lst, x):\n"
+            "    for i, v in enumerate(lst):\n"
+            "        if v == x:\n"
+            "            return i\n"
+            "    return -1\n"
+        )
+        assert "inconsistent_return" not in patterns(code)
