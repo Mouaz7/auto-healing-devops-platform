@@ -402,6 +402,25 @@ class FixGenerator:
                     logger.warning("fix_has_no_valid_files build_id=%s llm_raw=%s",
                                    analysis.build_id, parsed.get("files_to_modify"))
 
+                bugs_found = parsed.get("bugs_found", [])
+                # Synthesize bug list from changed_lines when LLM didn't return bugs_found.
+                # Each changed line represents one bug fix; use the inline AUTO-HEAL comment
+                # (or the new code itself) as the bug description.
+                if not bugs_found and changed_lines:
+                    for lineno_str, new_code in sorted(
+                        changed_lines.items(),
+                        key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0,
+                    ):
+                        comment = ""
+                        if "# AUTO-HEAL:" in new_code:
+                            comment = new_code.split("# AUTO-HEAL:", 1)[1].strip()
+                        if comment:
+                            bugs_found.append(f"Line {lineno_str}: {comment[:120]}")
+                        else:
+                            bugs_found.append(
+                                f"Line {lineno_str}: fixed → `{new_code.strip()[:80]}`"
+                            )
+
                 return CodeFix(
                     build_id=analysis.build_id,
                     fix_patch=fix_code,
@@ -411,7 +430,7 @@ class FixGenerator:
                     lint_ok=quality.passed,
                     test_ok=False,
                     changed_lines={str(k): v for k, v in changed_lines.items()},
-                    bugs_found=parsed.get("bugs_found", []),
+                    bugs_found=bugs_found,
                 )
 
             except (AllModelsFailed, FixTooLongError, SecretLeakError,

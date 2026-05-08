@@ -91,7 +91,8 @@ OUTPUT FORMAT (JSON ONLY — no prose outside the JSON)
   "confidence": 0.0-1.0,
   "explanation": "Pedagogical: phases 1-3 condensed. Emojis allowed.",
   "files_to_modify": ["path/to/file.py"],
-  "estimated_blast_radius": "LOW|MEDIUM|HIGH"
+  "estimated_blast_radius": "LOW|MEDIUM|HIGH",
+  "bugs_found": ["bug 1 description", "bug 2 description", ...]
 }
 
 ==============================================================================
@@ -102,7 +103,8 @@ EXAMPLE A — single-line surgical fix (binary search self-assignment)
   "explanation": "Phase 1: binary search shrinks a sorted range to find a target. Phase 2: line 14 had 'right = right' — a no-op self-assignment that never shrinks the range, causing infinite loop when arr[mid] > target. Phase 3: surgical fix — only line 14 is wrong. Phase 4: change to 'right = mid - 1' so the search excludes the current middle.",
   "files_to_modify": ["tests/test_kram.py"],
   "confidence": 0.95,
-  "estimated_blast_radius": "LOW"
+  "estimated_blast_radius": "LOW",
+  "bugs_found": ["line 14: self-assignment 'right = right' causes infinite loop — fixed to 'right = mid - 1'"]
 }
 
 ==============================================================================
