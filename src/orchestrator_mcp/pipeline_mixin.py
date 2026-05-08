@@ -33,6 +33,7 @@ from src.orchestrator_mcp.pipeline_helpers import (
     extract_failed_files,
 )
 from src.orchestrator_mcp.rate_limiter import rate_limiter
+from src.llm_mcp.bug_scanner import BugPatternScanner
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +245,7 @@ class PipelineMixin:
 
         return await self._finalise(
             client, build_id, repo, analysis, fix, verdict, elapsed_s=elapsed_s,
+            original_code=code_context,
         )
 
     # --- Pipeline steps -----------------------------------------------
@@ -439,11 +441,27 @@ class PipelineMixin:
 
     async def _finalise(
         self, client, build_id, repo, analysis, fix, verdict, elapsed_s: int = 0,
+        original_code: str = "",
     ) -> dict:
         """Apply traffic-light decision: PR + merge / PR + Slack / BLOCKED."""
         colour = verdict.get("status", "RED")
         pr_url = ""
         files_for_pr = analysis["affected_files"] or fix.get("files_to_modify", [])
+
+        # Run static bug scanner on the original (buggy) code for detailed findings
+        scan_findings = []
+        if original_code:
+            scan_result = BugPatternScanner.scan(original_code)
+            scan_findings = [
+                {
+                    "pattern": f.pattern,
+                    "line":    f.line,
+                    "message": f.message,
+                    "severity": f.severity,
+                    "suggestion": f.suggestion,
+                }
+                for f in scan_result.findings
+            ]
 
         report_data = {
             "colour":         colour,
@@ -456,13 +474,15 @@ class PipelineMixin:
             "all_affected_files": analysis.get("affected_files", []),
             "fix_strategy":   fix.get("fix_strategy", ""),
             "bug_list":       fix.get("bug_list", []),
-            "bug_count":      fix.get("bug_count", 0),
+            "bug_count":      fix.get("bug_count", 0) or len(scan_findings),
             "attempts":       fix.get("attempts", 1),
             "model_used":     fix.get("model_used", ""),
             "bandit_issues":  fix.get("bandit_issues", []),
             "regression_risk": fix.get("regression_risk", ""),
             "test_hints":     fix.get("test_hints", []),
             "complexity":     fix.get("complexity", ""),
+            "original_code":  original_code,
+            "scan_findings":  scan_findings,
         }
 
         if colour in ("GREEN", "YELLOW"):
@@ -483,6 +503,7 @@ class PipelineMixin:
                     repo=repo,
                     score=fix["confidence"],
                     explanation=fix.get("explanation", ""),
+                    report_data={**report_data, "fix_patch": fix.get("fix_patch", "")},
                 )
             heal_verifier.record_fix(build_id, files_for_pr)
         else:

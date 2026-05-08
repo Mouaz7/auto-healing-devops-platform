@@ -242,35 +242,78 @@ class PatchSubmitter:
         report_data: dict | None = None,
     ) -> dict:
         rd = report_data or {}
-        colour       = rd.get("colour", "")
-        score        = round(float(rd.get("confidence", 0)) * 100)
-        elapsed      = rd.get("elapsed_s", 0)
-        error_t      = rd.get("error_type", "")
-        blast        = rd.get("blast_radius", "")
-        root_c       = rd.get("root_cause", "")
-        expl         = rd.get("explanation", "")
-        fix_strategy = rd.get("fix_strategy", "")
-        bug_list     = rd.get("bug_list", [])
-        bug_count    = rd.get("bug_count", 0) or len(bug_list)
-        attempts     = rd.get("attempts", 1)
-        model_used   = rd.get("model_used", "AI model")
-        bandit_issues= rd.get("bandit_issues", [])
-        regression   = rd.get("regression_risk", "")
-        test_hints   = rd.get("test_hints", [])
-        complexity   = rd.get("complexity", "")
-        all_files    = rd.get("all_affected_files", affected_files)
+        colour        = rd.get("colour", "")
+        score         = round(float(rd.get("confidence", 0)) * 100)
+        elapsed       = rd.get("elapsed_s", 0)
+        error_t       = rd.get("error_type", "")
+        blast         = rd.get("blast_radius", "")
+        root_c        = rd.get("root_cause", "")
+        expl          = rd.get("explanation", "")
+        fix_strategy  = rd.get("fix_strategy", "")
+        bug_list      = rd.get("bug_list", [])
+        scan_findings = rd.get("scan_findings", [])
+        bug_count     = rd.get("bug_count", 0) or len(scan_findings) or len(bug_list)
+        attempts      = rd.get("attempts", 1)
+        model_used    = rd.get("model_used", "AI model")
+        bandit_issues = rd.get("bandit_issues", [])
+        regression    = rd.get("regression_risk", "")
+        test_hints    = rd.get("test_hints", [])
+        complexity    = rd.get("complexity", "")
+        all_files     = rd.get("all_affected_files", affected_files)
+        original_code = rd.get("original_code", "")
 
         dur = f"{elapsed // 60}m {elapsed % 60}s" if elapsed >= 60 else (f"{elapsed}s" if elapsed else "—")
         emoji_map = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴"}
         emoji = emoji_map.get(colour, "🤖")
-        colour_label = {"GREEN": "GREEN — Hög konfidens", "YELLOW": "YELLOW — Manuell granskning krävs", "RED": "RED — Blockerad"}.get(colour, colour)
+        colour_label = {
+            "GREEN":  "GREEN — Hög konfidens",
+            "YELLOW": "YELLOW — Manuell granskning krävs",
+            "RED":    "RED — Blockerad",
+        }.get(colour, colour)
 
-        files_str    = "\n".join(f"  - `{f}`" for f in all_files) or "  - _(okänd)_"
-        bug_str      = "\n".join(f"  {i+1}. {b}" for i, b in enumerate(bug_list)) if bug_list else "  _(inga specifika buggar listade)_"
-        bandit_str   = "\n".join(f"  - {b}" for b in bandit_issues) if bandit_issues else "  ✅ Inga säkerhetsproblem hittades"
-        test_str     = "\n".join(f"  - {t}" for t in test_hints) if test_hints else "  _(inga specifika testhints)_"
-
+        files_str  = "\n".join(f"  - `{f}`" for f in all_files) or "  - _(okänd)_"
+        bandit_str = "\n".join(f"  - {b}" for b in bandit_issues) if bandit_issues else "  ✅ Inga säkerhetsproblem hittades"
+        test_str   = "\n".join(f"  - {t}" for t in test_hints) if test_hints else "  _(inga specifika testhints)_"
         confidence_bar = "█" * (score // 10) + "░" * (10 - score // 10)
+
+        # --- Build detailed bug findings section with line numbers ---
+        if scan_findings:
+            sev_icon = {"HIGH": "🔴", "MEDIUM": "🟡", "INFO": "🔵"}
+            bug_lines = []
+            for i, f in enumerate(scan_findings, 1):
+                icon = sev_icon.get(f.get("severity", "HIGH"), "🔴")
+                bug_lines.append(
+                    f"  **{i}. {icon} Rad {f['line']} — `{f['pattern']}`** "
+                    f"({f.get('severity','HIGH')})\n"
+                    f"  > {f['message']}"
+                    + (f"\n  > 💡 Fix: {f['suggestion']}" if f.get('suggestion') else "")
+                )
+                # Show the actual buggy line from original code if available
+                if original_code:
+                    orig_lines = original_code.splitlines()
+                    lineno = f["line"] - 1
+                    if 0 <= lineno < len(orig_lines):
+                        buggy_line = orig_lines[lineno].strip()
+                        bug_lines.append(f"  ```python\n  # Rad {f['line']}: {buggy_line}\n  ```")
+            bug_details_str = "\n\n".join(bug_lines)
+        elif bug_list:
+            bug_details_str = "\n".join(f"  {i+1}. {b}" for i, b in enumerate(bug_list))
+        else:
+            bug_details_str = "  _(inga specifika buggar identifierade av statisk scanner)_"
+
+        # --- Before/After code comparison ---
+        orig_preview = ""
+        new_preview  = ""
+        if original_code:
+            orig_lines_all = original_code.splitlines()
+            orig_preview = "\n".join(orig_lines_all[:60])
+            if len(orig_lines_all) > 60:
+                orig_preview += f"\n# ... ({len(orig_lines_all) - 60} fler rader)"
+        if patch:
+            patch_lines_all = patch.splitlines()
+            new_preview = "\n".join(patch_lines_all[:60])
+            if len(patch_lines_all) > 60:
+                new_preview += f"\n# ... ({len(patch_lines_all) - 60} fler rader)"
 
         body = (
             f"{emoji} **Auto-Heal Fix** — build `{build_id}`\n\n"
@@ -286,7 +329,7 @@ class PatchSubmitter:
             f"| **Feltyp** | `{error_t}` |\n"
             f"| **Blast Radius** | `{blast or '—'}` |\n"
             f"| **Komplexitet** | {complexity or '—'} |\n"
-            f"| **Antal buggar** | {bug_count} |\n"
+            f"| **Antal buggar (scanner)** | {bug_count} |\n"
             f"| **AI-försök** | {attempts} |\n"
             f"| **Modell** | `{model_used}` |\n"
             f"| **Tid till fix** | {dur} |\n\n"
@@ -300,11 +343,11 @@ class PatchSubmitter:
             f"Blast radius (hur mycket av systemet påverkas): **{blast or 'okänd'}**.\n\n"
 
             f"---\n\n"
-            f"## 🐛 Identifierade buggar ({bug_count} st)\n\n"
-            f"{bug_str}\n\n"
+            f"## 🐛 Buggar med exakta radnummer ({bug_count} st)\n\n"
+            f"{bug_details_str}\n\n"
 
             f"---\n\n"
-            f"## 🛠️ Fix-strategi\n\n"
+            f"## 🛠️ Fix-strategi & förklaring\n\n"
             f"{fix_strategy or expl or '_(ingen strategi angiven)_'}\n\n"
             f"### Detaljerad förklaring\n"
             f"{expl or '_(ingen förklaring)_'}\n\n"
@@ -312,6 +355,15 @@ class PatchSubmitter:
             f"---\n\n"
             f"## 📁 Påverkade filer\n\n"
             f"{files_str}\n\n"
+
+            f"---\n\n"
+            f"## 🔄 Kod — Före vs Efter\n\n"
+            f"<details><summary>▶ Visa ORIGINAL (buggig) kod</summary>\n\n"
+            f"```python\n{orig_preview or '_(original kod ej tillgänglig)_'}\n```\n"
+            f"</details>\n\n"
+            f"<details><summary>▶ Visa FIXAD kod</summary>\n\n"
+            f"```python\n{new_preview or '_(fixad kod ej tillgänglig)_'}\n```\n"
+            f"</details>\n\n"
 
             f"---\n\n"
             f"## 🔒 Säkerhetsanalys (Bandit)\n\n"
@@ -335,10 +387,10 @@ class PatchSubmitter:
             f"```\n\n"
 
             f"---\n\n"
-            f"## 📝 Genererad patch\n\n"
+            f"## 📝 Fullständig patch\n\n"
             f"<details><summary>▶ Visa fullständig patch ({len(patch)} tecken)</summary>\n\n"
-            f"```python\n{patch[:6000]}\n```\n"
-            f"{'_(patch trunkerad — se fil för fullständig version)_' if len(patch) > 6000 else ''}"
+            f"```python\n{patch[:8000]}\n```\n"
+            f"{'> _(patch trunkerad — se filen direkt för fullständig version)_' if len(patch) > 8000 else ''}"
             f"\n</details>\n\n"
 
             f"---\n\n"

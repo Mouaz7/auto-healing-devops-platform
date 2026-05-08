@@ -79,51 +79,138 @@ async def send_slack_review_buttons(
     repo: str,
     score: float,
     explanation: str = "",
+    report_data: dict | None = None,
 ) -> bool:
-    """Send YELLOW review message with Approve/Reject buttons to Slack."""
+    """Send detailed review message with Approve/Reject buttons to Slack."""
     if not _SLACK_WEBHOOK_URL:
         return False
 
-    payload = {
-        "blocks": [
-            {
-                "type": "header",
-                "text": {"type": "plain_text", "text": "🟡 AI Fix — Human Review Required"},
+    rd = report_data or {}
+    score_pct    = round(score * 100)
+    error_t      = rd.get("error_type", "—")
+    blast        = rd.get("blast_radius", "—")
+    root_c       = rd.get("root_cause", "—")
+    scan_findings= rd.get("scan_findings", [])
+    bug_count    = rd.get("bug_count", 0) or len(scan_findings)
+    elapsed      = rd.get("elapsed_s", 0)
+    dur          = f"{elapsed // 60}m {elapsed % 60}s" if elapsed >= 60 else (f"{elapsed}s" if elapsed else "—")
+    colour       = rd.get("colour", "GREEN")
+    conf_bar     = "█" * (score_pct // 10) + "░" * (10 - score_pct // 10)
+
+    # Build bug findings text for Slack (with line numbers)
+    if scan_findings:
+        sev_icon = {"HIGH": "🔴", "MEDIUM": "🟡", "INFO": "🔵"}
+        bug_lines = []
+        for i, f in enumerate(scan_findings[:8], 1):  # max 8 in Slack to avoid length limit
+            icon = sev_icon.get(f.get("severity", "HIGH"), "🔴")
+            bug_lines.append(
+                f"{i}. {icon} *Rad {f['line']}* — `{f['pattern']}` "
+                f"({f.get('severity','HIGH')})\n   _{f['message'][:120]}_"
+            )
+        if len(scan_findings) > 8:
+            bug_lines.append(f"_...och {len(scan_findings) - 8} fler buggar (se PR för fullständig lista)_")
+        bug_text = "\n".join(bug_lines)
+    else:
+        bug_text = "_(Inga buggar hittade av statisk scanner)_"
+
+    # Short before/after snippet (first 10 lines of each)
+    original_code = rd.get("original_code", "")
+    fix_patch     = rd.get("fix_patch", "")
+    orig_snippet  = "\n".join(original_code.splitlines()[:10]) if original_code else ""
+    fix_snippet   = "\n".join(fix_patch.splitlines()[:10]) if fix_patch else ""
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"{'✅' if colour == 'GREEN' else '🟡'} Auto-Fix Klar — Granskning Krävs"},
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*Build:* `{build_id}`\n"
+                    f"*Konfidens:* {score_pct}% `{conf_bar}`\n"
+                    f"*Tid till fix:* {dur}\n"
+                    f"*PR:* <{pr_url}|Öppna på GitHub>"
+                ),
             },
-            {
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*🔍 Felanalys*\n"
+                    f"• *Feltyp:* `{error_t}`\n"
+                    f"• *Blast Radius:* `{blast}`\n"
+                    f"• *Rotorsak:* {root_c[:200]}"
+                ),
+            },
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*🐛 Hittade buggar ({bug_count} st med exakta radnummer)*\n{bug_text}",
+            },
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*🛠️ Vad fixades*\n{explanation[:400]}",
+            },
+        },
+    ]
+
+    # Add before/after snippets if available
+    if orig_snippet or fix_snippet:
+        blocks.append({"type": "divider"})
+        if orig_snippet:
+            blocks.append({
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": (
-                        f"*Build:* `{build_id}`\n"
-                        f"*Confidence:* {round(score * 100)}%\n"
-                        f"*PR:* <{pr_url}|View on GitHub>\n"
-                        f"*Fix:* {explanation[:300]}"
-                    ),
+                    "text": f"*🔴 Kod FÖRE (buggig — första 10 rader)*\n```{orig_snippet}```",
                 },
-            },
-            {"type": "divider"},
-            {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "✅ Approve & Merge"},
-                        "style": "primary",
-                        "action_id": "approve_fix",
-                        "value": f"{repo}|{pr_number}|{build_id}",
-                    },
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "❌ Reject"},
-                        "style": "danger",
-                        "action_id": "reject_fix",
-                        "value": f"{repo}|{pr_number}|{build_id}",
-                    },
-                ],
-            },
-        ]
-    }
+            })
+        if fix_snippet:
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*✅ Kod EFTER (fixad — första 10 rader)*\n```{fix_snippet}```",
+                },
+            })
+
+    blocks += [
+        {"type": "divider"},
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "✅ Godkänn & Merga"},
+                    "style": "primary",
+                    "action_id": "approve_fix",
+                    "value": f"{repo}|{pr_number}|{build_id}",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "❌ Avvisa"},
+                    "style": "danger",
+                    "action_id": "reject_fix",
+                    "value": f"{repo}|{pr_number}|{build_id}",
+                },
+            ],
+        },
+    ]
+
+    payload = {"blocks": blocks}
 
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
