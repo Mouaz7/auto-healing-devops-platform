@@ -465,6 +465,18 @@ class PipelineMixin:
                 for f in scan_result.findings
             ]
 
+        # Resolve bugs_found: prefer LLM output, then synthesize from parse_error/root_cause
+        # so the PR never shows "Bugs Found: 0" when a real error was detected.
+        bugs_found_final = fix.get("bugs_found", [])
+        if not bugs_found_final:
+            if parse_error:
+                import re as _re_pm
+                line_m = _re_pm.search(r"line[:\s]+(\d+)", parse_error, _re_pm.IGNORECASE)
+                line_hint = f" (line {line_m.group(1)})" if line_m else ""
+                bugs_found_final = [f"Syntax error{line_hint}: {parse_error[:200]}"]
+            elif analysis.get("root_cause"):
+                bugs_found_final = [str(analysis["root_cause"])[:200]]
+
         report_data = {
             "colour":         colour,
             "confidence":     fix.get("confidence", 0.0),
@@ -477,7 +489,7 @@ class PipelineMixin:
             "fix_strategy":   fix.get("fix_strategy", ""),
             "bug_list":       fix.get("bug_list", []),
             "bug_count":      (
-                len(fix.get("bugs_found", []))
+                len(bugs_found_final)
                 or len(fix.get("changed_lines", {}))
                 or len(scan_findings)
                 or fix.get("bug_count", 0)
@@ -493,7 +505,7 @@ class PipelineMixin:
             "parse_error":    parse_error,
             "cleaned_logs":   fix.get("cleaned_logs", analysis.get("root_cause", "")),
             "changed_lines":  fix.get("changed_lines", {}),
-            "bugs_found":     fix.get("bugs_found", []),
+            "bugs_found":     bugs_found_final,
         }
 
         if colour in ("GREEN", "YELLOW"):
