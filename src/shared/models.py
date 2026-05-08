@@ -98,6 +98,8 @@ class CodeFix:
     explanation: str = ""
     lint_ok: bool = False
     test_ok: bool = False
+    changed_lines: dict = field(default_factory=dict)   # {line_number: new_code}
+    bugs_found: list = field(default_factory=list)      # ["bug description", ...]
 
 
 @dataclass

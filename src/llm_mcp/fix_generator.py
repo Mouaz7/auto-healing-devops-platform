@@ -410,6 +410,8 @@ class FixGenerator:
                     explanation=parsed.get("explanation", ""),
                     lint_ok=quality.passed,
                     test_ok=False,
+                    changed_lines={str(k): v for k, v in changed_lines.items()},
+                    bugs_found=parsed.get("bugs_found", []),
                 )
 
             except (AllModelsFailed, FixTooLongError, SecretLeakError,

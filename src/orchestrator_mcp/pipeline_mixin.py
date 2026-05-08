@@ -487,6 +487,8 @@ class PipelineMixin:
             "scan_findings":  scan_findings,
             "parse_error":    parse_error,
             "cleaned_logs":   fix.get("cleaned_logs", analysis.get("root_cause", "")),
+            "changed_lines":  fix.get("changed_lines", {}),
+            "bugs_found":     fix.get("bugs_found", []),
         }
 
         if colour in ("GREEN", "YELLOW"):
