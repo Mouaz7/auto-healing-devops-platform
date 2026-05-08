@@ -77,13 +77,15 @@ class LLMMCPServer(MCPServiceBase):
             )
 
         return web.json_response({
-            "build_id": fix.build_id,
-            "fix_patch": fix.fix_patch,
+            "build_id":        fix.build_id,
+            "fix_patch":       fix.fix_patch,
             "files_to_modify": fix.files_to_modify,
-            "confidence": fix.confidence,
-            "explanation": fix.explanation,
-            "lint_ok": fix.lint_ok,
-            "test_ok": fix.test_ok,
+            "confidence":      fix.confidence,
+            "explanation":     fix.explanation,
+            "lint_ok":         fix.lint_ok,
+            "test_ok":         fix.test_ok,
+            "changed_lines":   fix.changed_lines,
+            "bugs_found":      fix.bugs_found,
         })
 
 

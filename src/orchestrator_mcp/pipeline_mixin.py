@@ -476,7 +476,12 @@ class PipelineMixin:
             "all_affected_files": analysis.get("affected_files", []),
             "fix_strategy":   fix.get("fix_strategy", ""),
             "bug_list":       fix.get("bug_list", []),
-            "bug_count":      fix.get("bug_count", 0) or len(scan_findings),
+            "bug_count":      (
+                len(fix.get("bugs_found", []))
+                or len(fix.get("changed_lines", {}))
+                or len(scan_findings)
+                or fix.get("bug_count", 0)
+            ),
             "attempts":       fix.get("attempts", 1),
             "model_used":     fix.get("model_used", ""),
             "bandit_issues":  fix.get("bandit_issues", []),
