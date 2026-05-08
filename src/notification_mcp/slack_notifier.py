@@ -101,17 +101,18 @@ async def send_slack_review_buttons(
     if scan_findings:
         sev_icon = {"HIGH": "🔴", "MEDIUM": "🟡", "INFO": "🔵"}
         bug_lines = []
-        for i, f in enumerate(scan_findings[:8], 1):  # max 8 in Slack to avoid length limit
+        for i, f in enumerate(scan_findings[:8], 1):
             icon = sev_icon.get(f.get("severity", "HIGH"), "🔴")
+            fix_hint = f"  → Fix: {f['suggestion']}" if f.get("suggestion") else ""
             bug_lines.append(
-                f"{i}. {icon} *Rad {f['line']}* — `{f['pattern']}` "
-                f"({f.get('severity','HIGH')})\n   _{f['message'][:120]}_"
+                f"{i}. {icon} *Line {f['line']}* — `{f['pattern']}` ({f.get('severity','HIGH')})\n"
+                f"   _{f['message'][:120]}_{fix_hint}"
             )
         if len(scan_findings) > 8:
-            bug_lines.append(f"_...och {len(scan_findings) - 8} fler buggar (se PR för fullständig lista)_")
+            bug_lines.append(f"_...and {len(scan_findings) - 8} more bugs (see PR for full list)_")
         bug_text = "\n".join(bug_lines)
     else:
-        bug_text = "_(Inga buggar hittade av statisk scanner)_"
+        bug_text = "_(No bugs found by static scanner)_"
 
     # Short before/after snippet (first 10 lines of each)
     original_code = rd.get("original_code", "")
@@ -119,10 +120,12 @@ async def send_slack_review_buttons(
     orig_snippet  = "\n".join(original_code.splitlines()[:10]) if original_code else ""
     fix_snippet   = "\n".join(fix_patch.splitlines()[:10]) if fix_patch else ""
 
+    colour_label = {"GREEN": "✅ Auto-Fix Ready", "YELLOW": "🟡 Auto-Fix Ready"}.get(colour, "🤖 Auto-Fix Ready")
+
     blocks = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": f"{'✅' if colour == 'GREEN' else '🟡'} Auto-Fix Klar — Granskning Krävs"},
+            "text": {"type": "plain_text", "text": f"{colour_label} — Human Review Required"},
         },
         {
             "type": "section",
@@ -130,9 +133,9 @@ async def send_slack_review_buttons(
                 "type": "mrkdwn",
                 "text": (
                     f"*Build:* `{build_id}`\n"
-                    f"*Konfidens:* {score_pct}% `{conf_bar}`\n"
-                    f"*Tid till fix:* {dur}\n"
-                    f"*PR:* <{pr_url}|Öppna på GitHub>"
+                    f"*Confidence:* {score_pct}% `{conf_bar}`\n"
+                    f"*Time to fix:* {dur}\n"
+                    f"*PR:* <{pr_url}|View on GitHub>"
                 ),
             },
         },
@@ -142,10 +145,10 @@ async def send_slack_review_buttons(
             "text": {
                 "type": "mrkdwn",
                 "text": (
-                    f"*🔍 Felanalys*\n"
-                    f"• *Feltyp:* `{error_t}`\n"
+                    f"*🔍 Error Analysis*\n"
+                    f"• *Error Type:* `{error_t}`\n"
                     f"• *Blast Radius:* `{blast}`\n"
-                    f"• *Rotorsak:* {root_c[:200]}"
+                    f"• *Root Cause:* {root_c[:200]}"
                 ),
             },
         },
@@ -154,7 +157,7 @@ async def send_slack_review_buttons(
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*🐛 Hittade buggar ({bug_count} st med exakta radnummer)*\n{bug_text}",
+                "text": f"*🐛 Bugs Found — {bug_count} bug(s) with exact line numbers*\n{bug_text}",
             },
         },
         {"type": "divider"},
@@ -162,7 +165,7 @@ async def send_slack_review_buttons(
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*🛠️ Vad fixades*\n{explanation[:400]}",
+                "text": f"*🛠️ What was fixed*\n{explanation[:400]}",
             },
         },
     ]
@@ -175,7 +178,7 @@ async def send_slack_review_buttons(
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*🔴 Kod FÖRE (buggig — första 10 rader)*\n```{orig_snippet}```",
+                    "text": f"*🔴 Code BEFORE (buggy — first 10 lines)*\n```{orig_snippet}```",
                 },
             })
         if fix_snippet:
@@ -183,7 +186,7 @@ async def send_slack_review_buttons(
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*✅ Kod EFTER (fixad — första 10 rader)*\n```{fix_snippet}```",
+                    "text": f"*✅ Code AFTER (fixed — first 10 lines)*\n```{fix_snippet}```",
                 },
             })
 
@@ -194,14 +197,14 @@ async def send_slack_review_buttons(
             "elements": [
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "✅ Godkänn & Merga"},
+                    "text": {"type": "plain_text", "text": "✅ Approve & Merge"},
                     "style": "primary",
                     "action_id": "approve_fix",
                     "value": f"{repo}|{pr_number}|{build_id}",
                 },
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "❌ Avvisa"},
+                    "text": {"type": "plain_text", "text": "❌ Reject"},
                     "style": "danger",
                     "action_id": "reject_fix",
                     "value": f"{repo}|{pr_number}|{build_id}",
