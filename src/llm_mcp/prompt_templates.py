@@ -385,7 +385,12 @@ INSTRUCTIONS:
   ✓ Compile without any SyntaxError
   ✓ Use correct operators and logic
   ✓ Keep the same function names and purpose
-  ✓ Return correct values (-1 for not found, etc.)"""
+  ✓ Return correct values (-1 for not found, etc.)
+
+  OUTPUT: return JSON with fix_code AND a "bugs_found" list.
+  List EVERY bug you fixed as a separate string in bugs_found — one bug per entry.
+  Example: "bugs_found": ["missing colon after def", "arr[h+1] out-of-bounds → arr[h]", ...]
+  Do NOT leave bugs_found empty — if you fixed {bug_count} bugs, there must be {bug_count} entries."""
 
 MAX_FIX_LINES = 100          # Surgical mode: max lines changed
 MAX_FIX_LINES_COMPLEX = 600  # Complex mode: allow full file rewrite

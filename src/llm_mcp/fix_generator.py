@@ -403,9 +403,10 @@ class FixGenerator:
                                    analysis.build_id, parsed.get("files_to_modify"))
 
                 bugs_found = parsed.get("bugs_found", [])
-                # Synthesize bug list from changed_lines when LLM didn't return bugs_found.
-                # Each changed line represents one bug fix; use the inline AUTO-HEAL comment
-                # (or the new code itself) as the bug description.
+                explanation_text = parsed.get("explanation", "")
+
+                # Tier 1 fallback: synthesize from changed_lines (surgical mode).
+                # Each changed line is one bug; use its AUTO-HEAL inline comment as desc.
                 if not bugs_found and changed_lines:
                     for lineno_str, new_code in sorted(
                         changed_lines.items(),
@@ -420,6 +421,42 @@ class FixGenerator:
                             bugs_found.append(
                                 f"Line {lineno_str}: fixed → `{new_code.strip()[:80]}`"
                             )
+
+                # Tier 2 fallback: static AST scanner on original code (full-rewrite mode).
+                # BugPatternScanner fails on files with syntax errors, so only use findings
+                # when it actually returns something.
+                if not bugs_found and code_context:
+                    scan_result = BugPatternScanner.scan(code_context)
+                    if scan_result.findings:
+                        bugs_found = [
+                            f"Line {f.line}: [{f.pattern}] {f.message} — {f.suggestion}"
+                            for f in scan_result.findings
+                        ]
+
+                # Tier 3 fallback: parse the explanation for Phase 2 bug list.
+                # LLM explanation always narrates bugs in "Phase 2: ..." section.
+                # Extract numbered items like "1. missing colon" or "Bug 1: ...".
+                if not bugs_found and explanation_text:
+                    import re as _re
+                    # Find numbered items: "1. ...", "1) ...", "Bug 1: ...", "- ..."
+                    items = _re.findall(
+                        r"(?:^|\n)\s*(?:\d+[\.\)]\s*|[-•]\s*|Bug\s+\d+:\s*)(.{10,120})",
+                        explanation_text,
+                    )
+                    if items:
+                        bugs_found = [item.strip() for item in items[:20]]
+                    else:
+                        # Last resort: extract "N bugs" count from explanation and make
+                        # generic entries so the PR shows a real number, not 0.
+                        count_m = _re.search(
+                            r"(\d+)\s+bugs?\b", explanation_text, _re.IGNORECASE
+                        )
+                        if count_m:
+                            n = int(count_m.group(1))
+                            bugs_found = [
+                                f"Bug {i}: identified in full rewrite — see explanation"
+                                for i in range(1, n + 1)
+                            ]
 
                 return CodeFix(
                     build_id=analysis.build_id,
