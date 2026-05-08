@@ -446,13 +446,23 @@ class PipelineMixin:
         files_for_pr = analysis["affected_files"] or fix.get("files_to_modify", [])
 
         report_data = {
-            "colour":      colour,
-            "confidence":  fix.get("confidence", 0.0),
-            "elapsed_s":   elapsed_s,
-            "error_type":  str(analysis.get("error_type", "")),
-            "blast_radius": str(analysis.get("blast_radius", "")),
-            "root_cause":  analysis.get("root_cause", ""),
-            "explanation": fix.get("explanation", ""),
+            "colour":         colour,
+            "confidence":     fix.get("confidence", 0.0),
+            "elapsed_s":      elapsed_s,
+            "error_type":     str(analysis.get("error_type", "")),
+            "blast_radius":   str(analysis.get("blast_radius", "")),
+            "root_cause":     analysis.get("root_cause", ""),
+            "explanation":    fix.get("explanation", ""),
+            "all_affected_files": analysis.get("affected_files", []),
+            "fix_strategy":   fix.get("fix_strategy", ""),
+            "bug_list":       fix.get("bug_list", []),
+            "bug_count":      fix.get("bug_count", 0),
+            "attempts":       fix.get("attempts", 1),
+            "model_used":     fix.get("model_used", ""),
+            "bandit_issues":  fix.get("bandit_issues", []),
+            "regression_risk": fix.get("regression_risk", ""),
+            "test_hints":     fix.get("test_hints", []),
+            "complexity":     fix.get("complexity", ""),
         }
 
         if colour in ("GREEN", "YELLOW"):

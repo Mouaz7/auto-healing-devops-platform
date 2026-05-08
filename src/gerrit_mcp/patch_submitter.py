@@ -242,33 +242,108 @@ class PatchSubmitter:
         report_data: dict | None = None,
     ) -> dict:
         rd = report_data or {}
-        colour    = rd.get("colour", "")
-        score     = round(float(rd.get("confidence", 0)) * 100)
-        elapsed   = rd.get("elapsed_s", 0)
-        error_t   = rd.get("error_type", "")
-        root_c    = rd.get("root_cause", "")
-        expl      = rd.get("explanation", "")
-        dur       = f"{elapsed // 60}m {elapsed % 60}s" if elapsed >= 60 else (f"{elapsed}s" if elapsed else "—")
+        colour       = rd.get("colour", "")
+        score        = round(float(rd.get("confidence", 0)) * 100)
+        elapsed      = rd.get("elapsed_s", 0)
+        error_t      = rd.get("error_type", "")
+        blast        = rd.get("blast_radius", "")
+        root_c       = rd.get("root_cause", "")
+        expl         = rd.get("explanation", "")
+        fix_strategy = rd.get("fix_strategy", "")
+        bug_list     = rd.get("bug_list", [])
+        bug_count    = rd.get("bug_count", 0) or len(bug_list)
+        attempts     = rd.get("attempts", 1)
+        model_used   = rd.get("model_used", "AI model")
+        bandit_issues= rd.get("bandit_issues", [])
+        regression   = rd.get("regression_risk", "")
+        test_hints   = rd.get("test_hints", [])
+        complexity   = rd.get("complexity", "")
+        all_files    = rd.get("all_affected_files", affected_files)
+
+        dur = f"{elapsed // 60}m {elapsed % 60}s" if elapsed >= 60 else (f"{elapsed}s" if elapsed else "—")
         emoji_map = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴"}
-        emoji     = emoji_map.get(colour, "🤖")
-        files_str = ", ".join(f"`{f}`" for f in affected_files) or "_(okänd)_"
+        emoji = emoji_map.get(colour, "🤖")
+        colour_label = {"GREEN": "GREEN — Hög konfidens", "YELLOW": "YELLOW — Manuell granskning krävs", "RED": "RED — Blockerad"}.get(colour, colour)
+
+        files_str    = "\n".join(f"  - `{f}`" for f in all_files) or "  - _(okänd)_"
+        bug_str      = "\n".join(f"  {i+1}. {b}" for i, b in enumerate(bug_list)) if bug_list else "  _(inga specifika buggar listade)_"
+        bandit_str   = "\n".join(f"  - {b}" for b in bandit_issues) if bandit_issues else "  ✅ Inga säkerhetsproblem hittades"
+        test_str     = "\n".join(f"  - {t}" for t in test_hints) if test_hints else "  _(inga specifika testhints)_"
+
+        confidence_bar = "█" * (score // 10) + "░" * (10 - score // 10)
 
         body = (
             f"{emoji} **Auto-Heal Fix** — build `{build_id}`\n\n"
+            f"> **Status:** {colour_label} | **Konfidens:** {score}% `{confidence_bar}`\n\n"
+            f"---\n\n"
+
+            f"## 📊 Sammanfattning\n\n"
             f"| Fält | Värde |\n"
             f"|------|-------|\n"
+            f"| **Build ID** | `{build_id}` |\n"
             f"| **Konfidenspoäng** | {score}% |\n"
+            f"| **Trafikljusstatus** | {emoji} {colour_label} |\n"
             f"| **Feltyp** | `{error_t}` |\n"
-            f"| **Rotorsak** | {root_c or '—'} |\n"
-            f"| **Fixade filer** | {files_str} |\n"
+            f"| **Blast Radius** | `{blast or '—'}` |\n"
+            f"| **Komplexitet** | {complexity or '—'} |\n"
+            f"| **Antal buggar** | {bug_count} |\n"
+            f"| **AI-försök** | {attempts} |\n"
+            f"| **Modell** | `{model_used}` |\n"
             f"| **Tid till fix** | {dur} |\n\n"
-            f"### Vad fixades\n{expl or '_(ingen förklaring)_'}\n\n"
-            f"### Agentpipeline\n"
-            f"log-cleaner → error-analyst → llm (code-repairer) → notification\n\n"
-            f"<details><summary>Visa patch</summary>\n\n"
-            f"```python\n{patch[:3000]}\n```\n</details>\n\n"
-            f"> Fullständig rapport finns i `AUTO_HEAL_REPORT.md` i denna PR.\n\n"
-            f"_Genererad av Auto-Healing AI DevOps Platform._"
+
+            f"---\n\n"
+            f"## 🔍 Felanalys\n\n"
+            f"### Rotorsak\n"
+            f"{root_c or '_(ingen rotorsak identifierad)_'}\n\n"
+            f"### Feltyp i detalj\n"
+            f"Felet klassificerades som **`{error_t}`**. "
+            f"Blast radius (hur mycket av systemet påverkas): **{blast or 'okänd'}**.\n\n"
+
+            f"---\n\n"
+            f"## 🐛 Identifierade buggar ({bug_count} st)\n\n"
+            f"{bug_str}\n\n"
+
+            f"---\n\n"
+            f"## 🛠️ Fix-strategi\n\n"
+            f"{fix_strategy or expl or '_(ingen strategi angiven)_'}\n\n"
+            f"### Detaljerad förklaring\n"
+            f"{expl or '_(ingen förklaring)_'}\n\n"
+
+            f"---\n\n"
+            f"## 📁 Påverkade filer\n\n"
+            f"{files_str}\n\n"
+
+            f"---\n\n"
+            f"## 🔒 Säkerhetsanalys (Bandit)\n\n"
+            f"{bandit_str}\n\n"
+
+            f"---\n\n"
+            f"## ⚠️ Regressionsrisk\n\n"
+            f"{regression or '_(ingen regressionsrisk identifierad)_'}\n\n"
+
+            f"---\n\n"
+            f"## 🧪 Testrekommendationer\n\n"
+            f"{test_str}\n\n"
+
+            f"---\n\n"
+            f"## 🤖 Agentpipeline\n\n"
+            f"```\n"
+            f"log-cleaner → error-analyst → llm (code-repairer) → notification\n"
+            f"     ↓              ↓                  ↓                  ↓\n"
+            f"  Städar      Analyserar        Genererar fix      Notifierar\n"
+            f"  loggar      felorsak          ({attempts} försök)     Slack/GitHub\n"
+            f"```\n\n"
+
+            f"---\n\n"
+            f"## 📝 Genererad patch\n\n"
+            f"<details><summary>▶ Visa fullständig patch ({len(patch)} tecken)</summary>\n\n"
+            f"```python\n{patch[:6000]}\n```\n"
+            f"{'_(patch trunkerad — se fil för fullständig version)_' if len(patch) > 6000 else ''}"
+            f"\n</details>\n\n"
+
+            f"---\n\n"
+            f"> 📋 Fullständig rapport finns i `AUTO_HEAL_REPORT.md` i denna PR.\n\n"
+            f"_Genererad av **Auto-Healing AI DevOps Platform** • Build `{build_id}` • Tid: {dur}_"
         )
         resp = await client.post(
             f"{_GITHUB_API}/repos/{repo}/pulls",
