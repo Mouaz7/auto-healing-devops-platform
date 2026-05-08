@@ -291,57 +291,86 @@ class PatchSubmitter:
         bandit_str     = "\n".join(f"  - {b}" for b in bandit_issues) if bandit_issues else "  ✅ No security issues found"
         test_str       = "\n".join(f"  - {t}" for t in test_hints) if test_hints else "  _(no specific test hints)_"
 
-        # --- Bug table with line numbers and solutions ---
-        orig_lines_list = original_code.splitlines() if original_code else []
+        # --- Bug → Fix table with actual code lines ---
+        orig_lines_list  = original_code.splitlines() if original_code else []
+        patch_lines_list = patch.splitlines() if patch else []
+
+        def _find_fixed_line(pattern: str, buggy_line: str, patch_lines: list[str]) -> str:
+            """Best-effort: find the replacement line in the patch for a given buggy line."""
+            buggy_stripped = buggy_line.strip()
+            for pl in patch_lines:
+                pl_s = pl.strip()
+                if pl_s and pl_s != buggy_stripped and len(pl_s) > 2:
+                    # Simple heuristic: same indentation level, similar length, not a comment
+                    if not pl_s.startswith("#") and abs(len(pl_s) - len(buggy_stripped)) < 40:
+                        return pl_s
+            return "_(see fixed file)_"
 
         if scan_findings:
             sev_icon = {"HIGH": "🔴", "MEDIUM": "🟡", "INFO": "🔵"}
-            table_rows = ["| # | Severity | Line | Bug Pattern | Description | Fix |",
-                          "|---|----------|------|-------------|-------------|-----|"]
+
+            # Overview table
+            ov_rows = ["| # | Sev | Line | Pattern | Problem |",
+                       "|---|-----|------|---------|---------|"]
+            for i, f in enumerate(scan_findings, 1):
+                icon = sev_icon.get(f.get("severity", "HIGH"), "🔴")
+                ov_rows.append(
+                    f"| {i} | {icon} {f.get('severity','HIGH')} | `{f['line']}` "
+                    f"| `{f['pattern']}` | {f['message'][:90]} |"
+                )
+            bug_table_str = "\n".join(ov_rows)
+
+            # Per-bug Before → After blocks
             detail_blocks = []
             for i, f in enumerate(scan_findings, 1):
-                icon    = sev_icon.get(f.get("severity", "HIGH"), "🔴")
-                sev     = f.get("severity", "HIGH")
-                lineno  = f["line"]
-                pattern = f["pattern"]
-                msg     = f["message"][:80]
-                fix_hint= f.get("suggestion", "—")[:80]
-                table_rows.append(f"| {i} | {icon} {sev} | `{lineno}` | `{pattern}` | {msg} | {fix_hint} |")
+                icon       = sev_icon.get(f.get("severity", "HIGH"), "🔴")
+                lineno     = f["line"]
+                pattern    = f["pattern"]
+                sev        = f.get("severity", "HIGH")
+                suggestion = f.get("suggestion", "")
 
-                # Per-bug detail block with actual buggy line of code
-                buggy_line_code = ""
+                buggy_line = ""
                 if orig_lines_list and 0 <= lineno - 1 < len(orig_lines_list):
-                    buggy_line_code = orig_lines_list[lineno - 1].strip()
+                    buggy_line = orig_lines_list[lineno - 1].rstrip()
 
-                detail_blocks.append(
-                    f"**{i}. {icon} Line {lineno} — `{pattern}`** ({sev})\n"
-                    f"> {f['message']}\n"
-                    + (f"> 💡 **Fix:** {f['suggestion']}\n" if f.get('suggestion') else "")
-                    + (f"\n```python\n# Line {lineno} (buggy):\n{buggy_line_code}\n```" if buggy_line_code else "")
+                # Try to find the corresponding fixed line in the patch
+                fixed_line = ""
+                if buggy_line and patch_lines_list:
+                    fixed_line = _find_fixed_line(pattern, buggy_line, patch_lines_list)
+
+                block = (
+                    f"### {i}. {icon} Line `{lineno}` — `{pattern}` ({sev})\n\n"
+                    f"> {f['message']}\n\n"
+                    f"| | Code |\n"
+                    f"|---|------|\n"
+                    f"| 🔴 **Bug (line {lineno})** | `{buggy_line or '—'}` |\n"
+                    f"| ✅ **Replacement** | `{suggestion or fixed_line or '—'}` |\n"
                 )
-            bug_table_str   = "\n".join(table_rows)
-            bug_details_str = "\n\n".join(detail_blocks)
+                detail_blocks.append(block)
+
+            bug_details_str = "\n".join(detail_blocks)
+
         elif bug_list:
-            table_rows = ["| # | Description |", "|---|-------------|"]
-            table_rows += [f"| {i+1} | {b} |" for i, b in enumerate(bug_list)]
-            bug_table_str   = "\n".join(table_rows)
+            ov_rows = ["| # | Description |", "|---|-------------|"]
+            ov_rows += [f"| {i+1} | {b} |" for i, b in enumerate(bug_list)]
+            bug_table_str   = "\n".join(ov_rows)
             bug_details_str = ""
         else:
             bug_table_str   = "_No bugs identified by static scanner._"
             bug_details_str = ""
 
-        # --- Before / After code ---
+        # --- Full file before/after ---
         if orig_lines_list:
-            orig_preview = "\n".join(orig_lines_list[:80])
+            orig_full = "\n".join(orig_lines_list[:80])
             if len(orig_lines_list) > 80:
-                orig_preview += f"\n# ... ({len(orig_lines_list) - 80} more lines)"
+                orig_full += f"\n# ... ({len(orig_lines_list) - 80} more lines)"
         else:
-            orig_preview = ""
+            orig_full = "# (original code unavailable)"
 
         patch_lines_all = patch.splitlines()
-        new_preview     = "\n".join(patch_lines_all[:80])
+        patch_full      = "\n".join(patch_lines_all[:80])
         if len(patch_lines_all) > 80:
-            new_preview += f"\n# ... ({len(patch_lines_all) - 80} more lines)"
+            patch_full += f"\n# ... ({len(patch_lines_all) - 80} more lines)"
 
         body = (
             f"{emoji} **Auto-Heal Fix** — build `{build_id}`\n\n"
@@ -371,9 +400,15 @@ class PatchSubmitter:
             f"Blast radius (system impact): **{blast or 'unknown'}**.\n\n"
 
             f"---\n\n"
-            f"## 🐛 Bug Report — {bug_count} bug(s) found with exact line numbers\n\n"
+            f"## 🐛 Bug Report — {bug_count} bug(s) with exact line numbers\n\n"
             f"{bug_table_str}\n\n"
-            + (f"### Detailed Bug Analysis\n\n{bug_details_str}\n\n" if bug_details_str else "")
+
+            + (
+                f"---\n\n"
+                f"## 🔄 Bug Details — What Changed (Bug → Fix per line)\n\n"
+                f"{bug_details_str}\n\n"
+                if bug_details_str else ""
+            )
 
             + f"---\n\n"
             f"## 🛠️ Fix Strategy & Explanation\n\n"
@@ -386,12 +421,12 @@ class PatchSubmitter:
             f"{files_str}\n\n"
 
             f"---\n\n"
-            f"## 🔄 Code — Before vs After\n\n"
-            f"<details><summary>▶ Show ORIGINAL (buggy) code</summary>\n\n"
-            f"```python\n{orig_preview if orig_preview else '# (original code unavailable — file may be new or not yet pushed)'}\n```\n"
+            f"## 🔄 Full File — Before vs After\n\n"
+            f"<details><summary>▶ Show ORIGINAL (buggy) file</summary>\n\n"
+            f"```python\n{orig_full}\n```\n"
             f"</details>\n\n"
-            f"<details><summary>▶ Show FIXED code</summary>\n\n"
-            f"```python\n{new_preview}\n```\n"
+            f"<details><summary>▶ Show FIXED file</summary>\n\n"
+            f"```python\n{patch_full}\n```\n"
             f"</details>\n\n"
 
             f"---\n\n"

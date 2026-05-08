@@ -37,8 +37,9 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 8. [AI Memory & Learning](#8-ai-memory--learning)
 9. [Log Processing Pipeline](#9-log-processing-pipeline)
 10. [Observability & Monitoring](#10-observability--monitoring)
-11. [Slack Integration](#11-slack-integration)
-12. [Test Suite](#12-test-suite)
+11. [GitHub PR Report](#11-github-pr-report)
+12. [Slack Integration](#12-slack-integration)
+13. [Test Suite](#13-test-suite)
 13. [Installation & Setup](#13-installation--setup)
 14. [Environment Variables](#14-environment-variables)
 15. [Project Structure](#15-project-structure)
@@ -486,34 +487,92 @@ Independent breaker per service: NIM API, GitHub API, Slack, Teams.
 
 ---
 
+## 11. GitHub PR Report
+
+Every auto-heal fix opens a GitHub Pull Request with a detailed structured report. All content is in **English**.
+
+### PR Report Sections
+
+| Section | Content |
+|---|---|
+| 📊 **Summary** | Build ID, confidence score + visual bar, traffic light status, error type, blast radius, bugs found, AI attempts, model used, time to fix |
+| 🔍 **Error Analysis** | Root cause, error type detail, blast radius explanation |
+| 🐛 **Bug Report** | Overview table: `# · Severity · Line · Pattern · Problem` for every bug found |
+| 🔄 **Bug Details — What Changed** | Per-bug table: `🔴 Bug (line N) → ✅ Replacement` showing the exact buggy line and its fix |
+| 🛠️ **Fix Strategy** | AI explanation of fix approach + detailed description |
+| 📁 **Affected Files** | List of all files modified |
+| 🔄 **Full File Before vs After** | Collapsible: original (buggy) file + fixed file side by side |
+| 🔒 **Security Analysis** | Bandit scan results on the generated fix |
+| ⚠️ **Regression Risk** | Assessment of what could break |
+| 🧪 **Test Recommendations** | Specific tests that should be run |
+| 🤖 **Agent Pipeline** | Visual diagram of the 4-step pipeline with attempt count |
+| 📝 **Full Patch** | Collapsible raw patch (up to 8000 chars) |
+
+### Bug → Fix Table Format
+
+For each bug identified by the static scanner:
+
+```
+### 1. 🔴 Line `14` — `off_by_one_range` (HIGH)
+
+> range(len(x)+1) silently skips last element
+
+| | Code |
+|---|------|
+| 🔴 Bug (line 14) | `for i in range(len(arr) + 1):` |
+| ✅ Replacement    | `use range(len(x))` |
+```
+
+This makes it immediately clear **what was wrong on which line** and **exactly what the fix is**.
+
+---
+
 ## 12. Slack Integration
 
-### GREEN & YELLOW — Interactive Review Buttons (HITL Enforced)
+### GREEN & YELLOW — Detailed Review Message (HITL Enforced)
 
-Both GREEN and YELLOW fixes send Slack Approve/Reject buttons. The difference is review urgency, not process:
+Both GREEN and YELLOW fixes send a rich Slack message with full analysis + Approve/Reject buttons. All text is in **English**.
 
-**GREEN (fast-track):**
+**What the Slack message contains:**
+
+| Section | Content |
+|---|---|
+| Header | Build ID, confidence score with visual bar `████████░░`, time to fix |
+| 🔍 Error Analysis | Error type, blast radius, root cause |
+| 🐛 Bugs Found | Each bug with exact **line number**, pattern name, severity, fix hint |
+| 🛠️ What was fixed | AI explanation of what changed and why |
+| 🔴 Code BEFORE | First 10 lines of the original buggy file |
+| ✅ Code AFTER | First 10 lines of the fixed file |
+| Buttons | **Approve & Merge** / **Reject** |
+
+**Example Slack message:**
 ```
-✅ Auto-fix Proposed (Review Required)
-Build: build-12345  |  Confidence: 97%  |  Blast radius: LOW
-High confidence — fix proposed for review (score 97%, threshold 85%)
-Files: src/utils.py
-Duration: 42s
+✅ Auto-Fix Ready — Human Review Required
 
-PR: [View on GitHub →]
+Build: `25528679737`
+Confidence: 99% `█████████░`
+Time to fix: 1m 8s
+PR: View on GitHub
 
-[✅ Approve & Merge]    [❌ Reject]
-```
+🔍 Error Analysis
+• Error Type: SYNTAX_ERROR
+• Blast Radius: LOW
+• Root Cause: SyntaxError: expected ':'
 
-**YELLOW (careful review):**
-```
-🟡 Human Review Required
-Build: build-12345  |  Confidence: 74%  |  Blast radius: LOW
-Medium confidence — careful human review required (score 74%, threshold 60%)
-Files: src/utils.py
-Duration: 58s
+🐛 Bugs Found — 4 bug(s) with exact line numbers
+1. 🔴 Line 3 — `off_by_one_range` (HIGH)
+   _range(len(x)+1) skips last element_ → Fix: use range(len(x))
+2. 🟡 Line 7 — `wrong_arithmetic_op` (MEDIUM)
+   _subtraction in average function_ → Fix: use addition
 
-PR: [View on GitHub →]
+🛠️ What was fixed
+Phase 1: ... Phase 2: ... Phase 3: ...
+
+🔴 Code BEFORE (buggy — first 10 lines)
+`def partition(arr, l, h): ...`
+
+✅ Code AFTER (fixed — first 10 lines)
+`def partition(arr, l, h): ...`
 
 [✅ Approve & Merge]    [❌ Reject]
 ```
@@ -525,9 +584,9 @@ Human clicks feed back to `fix_memory` and `adaptive_thresholds`.
 ```
 🔴 Fix Blocked
 Build: build-12345
-Low confidence — fix blocked (score 45% below 60% threshold)
 Files: src/complex_module.py
-Duration: 120s  |  Manual intervention required.
+Duration: 120s  |  Reason: Low confidence / regression loop.
+Manual intervention required.
 ```
 
 This also fires for regression loops ("Regression loop detected — same file fixed recently") and 422-rejected fixes ("Fix generation rejected — too complex").
