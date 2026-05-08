@@ -241,6 +241,8 @@ class PatchSubmitter:
         patch: str,
         report_data: dict | None = None,
     ) -> dict:
+        import base64 as _b64
+
         rd = report_data or {}
         colour        = rd.get("colour", "")
         score         = round(float(rd.get("confidence", 0)) * 100)
@@ -262,140 +264,167 @@ class PatchSubmitter:
         all_files     = rd.get("all_affected_files", affected_files)
         original_code = rd.get("original_code", "")
 
+        # Fetch original code from GitHub base branch if not already in report_data
+        if not original_code and affected_files and self._token:
+            try:
+                check = await client.get(
+                    f"{_GITHUB_API}/repos/{repo}/contents/{affected_files[0]}",
+                    params={"ref": base},
+                )
+                if check.status_code == 200:
+                    raw_b64 = check.json().get("content", "").replace("\n", "")
+                    original_code = _b64.b64decode(raw_b64).decode("utf-8", errors="replace")
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+
         dur = f"{elapsed // 60}m {elapsed % 60}s" if elapsed >= 60 else (f"{elapsed}s" if elapsed else "—")
         emoji_map = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴"}
         emoji = emoji_map.get(colour, "🤖")
         colour_label = {
-            "GREEN":  "GREEN — Hög konfidens",
-            "YELLOW": "YELLOW — Manuell granskning krävs",
-            "RED":    "RED — Blockerad",
+            "GREEN":  "GREEN — High Confidence",
+            "YELLOW": "YELLOW — Manual Review Required",
+            "RED":    "RED — Blocked",
         }.get(colour, colour)
 
-        files_str  = "\n".join(f"  - `{f}`" for f in all_files) or "  - _(okänd)_"
-        bandit_str = "\n".join(f"  - {b}" for b in bandit_issues) if bandit_issues else "  ✅ Inga säkerhetsproblem hittades"
-        test_str   = "\n".join(f"  - {t}" for t in test_hints) if test_hints else "  _(inga specifika testhints)_"
         confidence_bar = "█" * (score // 10) + "░" * (10 - score // 10)
+        files_str      = "\n".join(f"  - `{f}`" for f in all_files) or "  - _(unknown)_"
+        bandit_str     = "\n".join(f"  - {b}" for b in bandit_issues) if bandit_issues else "  ✅ No security issues found"
+        test_str       = "\n".join(f"  - {t}" for t in test_hints) if test_hints else "  _(no specific test hints)_"
 
-        # --- Build detailed bug findings section with line numbers ---
+        # --- Bug table with line numbers and solutions ---
+        orig_lines_list = original_code.splitlines() if original_code else []
+
         if scan_findings:
             sev_icon = {"HIGH": "🔴", "MEDIUM": "🟡", "INFO": "🔵"}
-            bug_lines = []
+            table_rows = ["| # | Severity | Line | Bug Pattern | Description | Fix |",
+                          "|---|----------|------|-------------|-------------|-----|"]
+            detail_blocks = []
             for i, f in enumerate(scan_findings, 1):
-                icon = sev_icon.get(f.get("severity", "HIGH"), "🔴")
-                bug_lines.append(
-                    f"  **{i}. {icon} Rad {f['line']} — `{f['pattern']}`** "
-                    f"({f.get('severity','HIGH')})\n"
-                    f"  > {f['message']}"
-                    + (f"\n  > 💡 Fix: {f['suggestion']}" if f.get('suggestion') else "")
-                )
-                # Show the actual buggy line from original code if available
-                if original_code:
-                    orig_lines = original_code.splitlines()
-                    lineno = f["line"] - 1
-                    if 0 <= lineno < len(orig_lines):
-                        buggy_line = orig_lines[lineno].strip()
-                        bug_lines.append(f"  ```python\n  # Rad {f['line']}: {buggy_line}\n  ```")
-            bug_details_str = "\n\n".join(bug_lines)
-        elif bug_list:
-            bug_details_str = "\n".join(f"  {i+1}. {b}" for i, b in enumerate(bug_list))
-        else:
-            bug_details_str = "  _(inga specifika buggar identifierade av statisk scanner)_"
+                icon    = sev_icon.get(f.get("severity", "HIGH"), "🔴")
+                sev     = f.get("severity", "HIGH")
+                lineno  = f["line"]
+                pattern = f["pattern"]
+                msg     = f["message"][:80]
+                fix_hint= f.get("suggestion", "—")[:80]
+                table_rows.append(f"| {i} | {icon} {sev} | `{lineno}` | `{pattern}` | {msg} | {fix_hint} |")
 
-        # --- Before/After code comparison ---
-        orig_preview = ""
-        new_preview  = ""
-        if original_code:
-            orig_lines_all = original_code.splitlines()
-            orig_preview = "\n".join(orig_lines_all[:60])
-            if len(orig_lines_all) > 60:
-                orig_preview += f"\n# ... ({len(orig_lines_all) - 60} fler rader)"
-        if patch:
-            patch_lines_all = patch.splitlines()
-            new_preview = "\n".join(patch_lines_all[:60])
-            if len(patch_lines_all) > 60:
-                new_preview += f"\n# ... ({len(patch_lines_all) - 60} fler rader)"
+                # Per-bug detail block with actual buggy line of code
+                buggy_line_code = ""
+                if orig_lines_list and 0 <= lineno - 1 < len(orig_lines_list):
+                    buggy_line_code = orig_lines_list[lineno - 1].strip()
+
+                detail_blocks.append(
+                    f"**{i}. {icon} Line {lineno} — `{pattern}`** ({sev})\n"
+                    f"> {f['message']}\n"
+                    + (f"> 💡 **Fix:** {f['suggestion']}\n" if f.get('suggestion') else "")
+                    + (f"\n```python\n# Line {lineno} (buggy):\n{buggy_line_code}\n```" if buggy_line_code else "")
+                )
+            bug_table_str   = "\n".join(table_rows)
+            bug_details_str = "\n\n".join(detail_blocks)
+        elif bug_list:
+            table_rows = ["| # | Description |", "|---|-------------|"]
+            table_rows += [f"| {i+1} | {b} |" for i, b in enumerate(bug_list)]
+            bug_table_str   = "\n".join(table_rows)
+            bug_details_str = ""
+        else:
+            bug_table_str   = "_No bugs identified by static scanner._"
+            bug_details_str = ""
+
+        # --- Before / After code ---
+        if orig_lines_list:
+            orig_preview = "\n".join(orig_lines_list[:80])
+            if len(orig_lines_list) > 80:
+                orig_preview += f"\n# ... ({len(orig_lines_list) - 80} more lines)"
+        else:
+            orig_preview = ""
+
+        patch_lines_all = patch.splitlines()
+        new_preview     = "\n".join(patch_lines_all[:80])
+        if len(patch_lines_all) > 80:
+            new_preview += f"\n# ... ({len(patch_lines_all) - 80} more lines)"
 
         body = (
             f"{emoji} **Auto-Heal Fix** — build `{build_id}`\n\n"
-            f"> **Status:** {colour_label} | **Konfidens:** {score}% `{confidence_bar}`\n\n"
+            f"> **Status:** {colour_label} | **Confidence:** {score}% `{confidence_bar}`\n\n"
             f"---\n\n"
 
-            f"## 📊 Sammanfattning\n\n"
-            f"| Fält | Värde |\n"
-            f"|------|-------|\n"
+            f"## 📊 Summary\n\n"
+            f"| Field | Value |\n"
+            f"|-------|-------|\n"
             f"| **Build ID** | `{build_id}` |\n"
-            f"| **Konfidenspoäng** | {score}% |\n"
-            f"| **Trafikljusstatus** | {emoji} {colour_label} |\n"
-            f"| **Feltyp** | `{error_t}` |\n"
+            f"| **Confidence Score** | {score}% |\n"
+            f"| **Traffic Light** | {emoji} {colour_label} |\n"
+            f"| **Error Type** | `{error_t}` |\n"
             f"| **Blast Radius** | `{blast or '—'}` |\n"
-            f"| **Komplexitet** | {complexity or '—'} |\n"
-            f"| **Antal buggar (scanner)** | {bug_count} |\n"
-            f"| **AI-försök** | {attempts} |\n"
-            f"| **Modell** | `{model_used}` |\n"
-            f"| **Tid till fix** | {dur} |\n\n"
+            f"| **Complexity** | {complexity or '—'} |\n"
+            f"| **Bugs Found** | {bug_count} |\n"
+            f"| **AI Attempts** | {attempts} |\n"
+            f"| **Model** | `{model_used}` |\n"
+            f"| **Time to Fix** | {dur} |\n\n"
 
             f"---\n\n"
-            f"## 🔍 Felanalys\n\n"
-            f"### Rotorsak\n"
-            f"{root_c or '_(ingen rotorsak identifierad)_'}\n\n"
-            f"### Feltyp i detalj\n"
-            f"Felet klassificerades som **`{error_t}`**. "
-            f"Blast radius (hur mycket av systemet påverkas): **{blast or 'okänd'}**.\n\n"
+            f"## 🔍 Error Analysis\n\n"
+            f"### Root Cause\n"
+            f"{root_c or '_(root cause not identified)_'}\n\n"
+            f"### Error Type Detail\n"
+            f"Error classified as **`{error_t}`**. "
+            f"Blast radius (system impact): **{blast or 'unknown'}**.\n\n"
 
             f"---\n\n"
-            f"## 🐛 Buggar med exakta radnummer ({bug_count} st)\n\n"
-            f"{bug_details_str}\n\n"
+            f"## 🐛 Bug Report — {bug_count} bug(s) found with exact line numbers\n\n"
+            f"{bug_table_str}\n\n"
+            + (f"### Detailed Bug Analysis\n\n{bug_details_str}\n\n" if bug_details_str else "")
+
+            + f"---\n\n"
+            f"## 🛠️ Fix Strategy & Explanation\n\n"
+            f"{fix_strategy or expl or '_(no strategy provided)_'}\n\n"
+            f"### Detailed Explanation\n"
+            f"{expl or '_(no explanation)_'}\n\n"
 
             f"---\n\n"
-            f"## 🛠️ Fix-strategi & förklaring\n\n"
-            f"{fix_strategy or expl or '_(ingen strategi angiven)_'}\n\n"
-            f"### Detaljerad förklaring\n"
-            f"{expl or '_(ingen förklaring)_'}\n\n"
-
-            f"---\n\n"
-            f"## 📁 Påverkade filer\n\n"
+            f"## 📁 Affected Files\n\n"
             f"{files_str}\n\n"
 
             f"---\n\n"
-            f"## 🔄 Kod — Före vs Efter\n\n"
-            f"<details><summary>▶ Visa ORIGINAL (buggig) kod</summary>\n\n"
-            f"```python\n{orig_preview or '_(original kod ej tillgänglig)_'}\n```\n"
+            f"## 🔄 Code — Before vs After\n\n"
+            f"<details><summary>▶ Show ORIGINAL (buggy) code</summary>\n\n"
+            f"```python\n{orig_preview if orig_preview else '# (original code unavailable — file may be new or not yet pushed)'}\n```\n"
             f"</details>\n\n"
-            f"<details><summary>▶ Visa FIXAD kod</summary>\n\n"
-            f"```python\n{new_preview or '_(fixad kod ej tillgänglig)_'}\n```\n"
+            f"<details><summary>▶ Show FIXED code</summary>\n\n"
+            f"```python\n{new_preview}\n```\n"
             f"</details>\n\n"
 
             f"---\n\n"
-            f"## 🔒 Säkerhetsanalys (Bandit)\n\n"
+            f"## 🔒 Security Analysis (Bandit)\n\n"
             f"{bandit_str}\n\n"
 
             f"---\n\n"
-            f"## ⚠️ Regressionsrisk\n\n"
-            f"{regression or '_(ingen regressionsrisk identifierad)_'}\n\n"
+            f"## ⚠️ Regression Risk\n\n"
+            f"{regression or '_(no regression risk identified)_'}\n\n"
 
             f"---\n\n"
-            f"## 🧪 Testrekommendationer\n\n"
+            f"## 🧪 Test Recommendations\n\n"
             f"{test_str}\n\n"
 
             f"---\n\n"
-            f"## 🤖 Agentpipeline\n\n"
+            f"## 🤖 Agent Pipeline\n\n"
             f"```\n"
             f"log-cleaner → error-analyst → llm (code-repairer) → notification\n"
             f"     ↓              ↓                  ↓                  ↓\n"
-            f"  Städar      Analyserar        Genererar fix      Notifierar\n"
-            f"  loggar      felorsak          ({attempts} försök)     Slack/GitHub\n"
+            f"  Cleans        Analyses         Generates fix      Notifies\n"
+            f"  logs          root cause       ({attempts} attempt(s))   Slack/GitHub\n"
             f"```\n\n"
 
             f"---\n\n"
-            f"## 📝 Fullständig patch\n\n"
-            f"<details><summary>▶ Visa fullständig patch ({len(patch)} tecken)</summary>\n\n"
+            f"## 📝 Full Patch\n\n"
+            f"<details><summary>▶ Show full patch ({len(patch)} chars)</summary>\n\n"
             f"```python\n{patch[:8000]}\n```\n"
-            f"{'> _(patch trunkerad — se filen direkt för fullständig version)_' if len(patch) > 8000 else ''}"
+            f"{'> _(patch truncated — view file directly for full version)_' if len(patch) > 8000 else ''}"
             f"\n</details>\n\n"
 
             f"---\n\n"
-            f"> 📋 Fullständig rapport finns i `AUTO_HEAL_REPORT.md` i denna PR.\n\n"
-            f"_Genererad av **Auto-Healing AI DevOps Platform** • Build `{build_id}` • Tid: {dur}_"
+            f"> 📋 Full report available in `AUTO_HEAL_REPORT.md` in this PR.\n\n"
+            f"_Generated by **Auto-Healing AI DevOps Platform** • Build `{build_id}` • Time: {dur}_"
         )
         resp = await client.post(
             f"{_GITHUB_API}/repos/{repo}/pulls",
