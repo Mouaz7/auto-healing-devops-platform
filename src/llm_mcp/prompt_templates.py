@@ -63,6 +63,15 @@ PHASE 4 — EXECUTION & THE FIX
     * Threads use locks when sharing mutable state.
     * Default arguments are never mutable (use `None` and `if x is None: x = []`).
 
+INLINE COMMENT REQUIREMENT (MANDATORY):
+  For EVERY line you change or add, place a short inline comment on that line:
+    # AUTO-HEAL: <what was wrong> -> <what was changed>
+  Examples:
+    idx = l - 1        # AUTO-HEAL: was 'l + 1' (off-by-one) -> corrected start index
+    for k in range(l, h):  # AUTO-HEAL: was 'range(l, l)' (empty range) -> fixed upper bound
+    piv = arr[h]       # AUTO-HEAL: was 'arr[h + 1]' (index out of bounds) -> correct pivot
+  Keep comments short (max 80 chars). Never add comments to unchanged lines.
+
 ==============================================================================
 STRICT CODE CONSTRAINTS
 ==============================================================================
@@ -236,6 +245,15 @@ PHASE 4 — EXECUTION & THE FIX
     - Returns the SAME function/variable names as the original (preserve API).
     - Comments only where genuinely useful — and ONLY in simple English.
 
+INLINE COMMENT REQUIREMENT (MANDATORY):
+  For EVERY line you change or add, place a short inline comment on that line:
+    # AUTO-HEAL: <what was wrong> -> <what was changed>
+  Examples:
+    idx = l - 1        # AUTO-HEAL: was 'l + 1' (off-by-one) -> corrected start index
+    for k in range(l, h):  # AUTO-HEAL: was 'range(l, l)' (empty range) -> fixed upper bound
+    piv = arr[h]       # AUTO-HEAL: was 'arr[h + 1]' (out of bounds) -> correct pivot
+  Keep comments under 80 chars. Never add AUTO-HEAL comments to unchanged lines.
+
   CRITICAL — DO NOT REMOVE INITIALISATION CODE WHEN FIXING A CONDITION:
     When the bug is in a condition (e.g. `if high < high`), the fix is the
     condition only. ALL surrounding code — especially default-argument
@@ -334,7 +352,11 @@ CRITICAL: Generate ONLY the minimal fix. Do NOT:
 DO:
   ✓ Fix the specific error (typo, wrong operator, missing colon, etc)
   ✓ Change ONLY the broken lines
-  ✓ Keep everything else exactly as-is"""
+  ✓ Keep everything else exactly as-is
+  ✓ Add an inline comment on every changed line:
+       # AUTO-HEAL: was '<old code>' (<bug type>) -> <what was fixed>
+     Example:
+       right = mid - 1  # AUTO-HEAL: was 'right = right' (self-assignment) -> shrinks range"""
 
 COMPLEX_REPAIR_TEMPLATE = """\
 Error Analysis:
