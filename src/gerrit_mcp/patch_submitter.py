@@ -243,6 +243,8 @@ class PatchSubmitter:
     ) -> dict:
         import base64 as _b64
 
+        import re as _re
+
         rd = report_data or {}
         colour        = rd.get("colour", "")
         score         = round(float(rd.get("confidence", 0)) * 100)
@@ -254,7 +256,8 @@ class PatchSubmitter:
         fix_strategy  = rd.get("fix_strategy", "")
         bug_list      = rd.get("bug_list", [])
         scan_findings = rd.get("scan_findings", [])
-        bug_count     = rd.get("bug_count", 0) or len(scan_findings) or len(bug_list)
+        parse_error   = rd.get("parse_error", "")
+        cleaned_logs  = rd.get("cleaned_logs", "")
         attempts      = rd.get("attempts", 1)
         model_used    = rd.get("model_used", "AI model")
         bandit_issues = rd.get("bandit_issues", [])
@@ -263,6 +266,41 @@ class PatchSubmitter:
         complexity    = rd.get("complexity", "")
         all_files     = rd.get("all_affected_files", affected_files)
         original_code = rd.get("original_code", "")
+
+        # When AST parse fails (syntax error), extract bugs from explanation + logs
+        if not scan_findings and (parse_error or error_t):
+            _extracted = []
+            # Add syntax parse error as first bug with line number if available
+            if parse_error:
+                _line_match = _re.search(r"line (\d+)", parse_error)
+                _lineno = int(_line_match.group(1)) if _line_match else 1
+                _extracted.append({
+                    "pattern":    "syntax_error",
+                    "line":       _lineno,
+                    "message":    parse_error,
+                    "severity":   "HIGH",
+                    "suggestion": "Fix the syntax error on this line",
+                })
+            # Extract additional bugs from the LLM explanation (Phase 2 section)
+            _phase2 = _re.search(r"Phase 2[:\s]+(.+?)(?:Phase 3|$)", expl, _re.DOTALL | _re.IGNORECASE)
+            if _phase2:
+                _bug_text = _phase2.group(1).strip()
+                # Split on comma/semicolon to get individual bugs
+                _items = _re.split(r"[,;]", _bug_text)
+                for _item in _items[:10]:
+                    _item = _item.strip().lstrip("- ").strip()
+                    if len(_item) > 10 and not _item.lower().startswith("multiple"):
+                        _extracted.append({
+                            "pattern":    "identified_bug",
+                            "line":       0,
+                            "message":    _item,
+                            "severity":   "HIGH",
+                            "suggestion": "See fixed file for replacement",
+                        })
+            if _extracted:
+                scan_findings = _extracted
+
+        bug_count = rd.get("bug_count", 0) or len(scan_findings) or len(bug_list)
 
         # Fetch original code from GitHub base branch if not already in report_data
         if not original_code and affected_files and self._token:
@@ -310,41 +348,42 @@ class PatchSubmitter:
             sev_icon = {"HIGH": "🔴", "MEDIUM": "🟡", "INFO": "🔵"}
 
             # Overview table
-            ov_rows = ["| # | Sev | Line | Pattern | Problem |",
-                       "|---|-----|------|---------|---------|"]
+            ov_rows = ["| # | Severity | Line | Pattern | Problem |",
+                       "|---|----------|------|---------|---------|"]
             for i, f in enumerate(scan_findings, 1):
-                icon = sev_icon.get(f.get("severity", "HIGH"), "🔴")
+                icon     = sev_icon.get(f.get("severity", "HIGH"), "🔴")
+                line_str = f"`{f['line']}`" if f.get("line") else "—"
                 ov_rows.append(
-                    f"| {i} | {icon} {f.get('severity','HIGH')} | `{f['line']}` "
-                    f"| `{f['pattern']}` | {f['message'][:90]} |"
+                    f"| {i} | {icon} {f.get('severity','HIGH')} | {line_str} "
+                    f"| `{f['pattern']}` | {f['message'][:100]} |"
                 )
             bug_table_str = "\n".join(ov_rows)
 
-            # Per-bug Before → After blocks
+            # Per-bug Before → After detail blocks
             detail_blocks = []
             for i, f in enumerate(scan_findings, 1):
                 icon       = sev_icon.get(f.get("severity", "HIGH"), "🔴")
-                lineno     = f["line"]
+                lineno     = f.get("line", 0)
                 pattern    = f["pattern"]
                 sev        = f.get("severity", "HIGH")
                 suggestion = f.get("suggestion", "")
 
                 buggy_line = ""
-                if orig_lines_list and 0 <= lineno - 1 < len(orig_lines_list):
+                if orig_lines_list and lineno and 0 <= lineno - 1 < len(orig_lines_list):
                     buggy_line = orig_lines_list[lineno - 1].rstrip()
 
-                # Try to find the corresponding fixed line in the patch
                 fixed_line = ""
                 if buggy_line and patch_lines_list:
                     fixed_line = _find_fixed_line(pattern, buggy_line, patch_lines_list)
 
+                line_label = f"line {lineno}" if lineno else "identified bug"
                 block = (
-                    f"### {i}. {icon} Line `{lineno}` — `{pattern}` ({sev})\n\n"
+                    f"### {i}. {icon} {f'Line `{lineno}`' if lineno else 'Bug'} — `{pattern}` ({sev})\n\n"
                     f"> {f['message']}\n\n"
                     f"| | Code |\n"
                     f"|---|------|\n"
-                    f"| 🔴 **Bug (line {lineno})** | `{buggy_line or '—'}` |\n"
-                    f"| ✅ **Replacement** | `{suggestion or fixed_line or '—'}` |\n"
+                    f"| 🔴 **Bug ({line_label})** | `{buggy_line or f['message'][:80]}` |\n"
+                    f"| ✅ **Replacement** | `{suggestion or fixed_line or 'See fixed file'}` |\n"
                 )
                 detail_blocks.append(block)
 

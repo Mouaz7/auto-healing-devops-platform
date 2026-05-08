@@ -450,14 +450,16 @@ class PipelineMixin:
 
         # Run static bug scanner on the original (buggy) code for detailed findings
         scan_findings = []
+        parse_error   = ""
         if original_code:
             scan_result = BugPatternScanner.scan(original_code)
+            parse_error = scan_result.parse_error  # non-empty when syntax error
             scan_findings = [
                 {
-                    "pattern": f.pattern,
-                    "line":    f.line,
-                    "message": f.message,
-                    "severity": f.severity,
+                    "pattern":    f.pattern,
+                    "line":       f.line,
+                    "message":    f.message,
+                    "severity":   f.severity,
                     "suggestion": f.suggestion,
                 }
                 for f in scan_result.findings
@@ -483,6 +485,8 @@ class PipelineMixin:
             "complexity":     fix.get("complexity", ""),
             "original_code":  original_code,
             "scan_findings":  scan_findings,
+            "parse_error":    parse_error,
+            "cleaned_logs":   fix.get("cleaned_logs", analysis.get("root_cause", "")),
         }
 
         if colour in ("GREEN", "YELLOW"):
