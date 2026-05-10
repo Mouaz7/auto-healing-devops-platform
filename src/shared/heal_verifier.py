@@ -44,6 +44,8 @@ class FixRecord:
     build_id:       str
     fixed_files:    frozenset[str]
     merged_at:      float = field(default_factory=time.time)
+    error_type:     str   = ""
+    retry_count:    int   = 0
 
 
 class HealVerifier:
@@ -61,23 +63,25 @@ class HealVerifier:
         self._fixes:  dict[str, FixRecord] = {}   # build_id → FixRecord
         self._lock = threading.Lock()
 
-    def record_fix(self, build_id: str, affected_files: list[str]) -> None:
+    def record_fix(self, build_id: str, affected_files: list[str], error_type: str = "") -> None:
         """Record a successfully deployed fix.
 
         Args:
             build_id:       The build whose fix was merged.
             affected_files: Files that were modified by the fix.
+            error_type:     The error type that was fixed (e.g. SYNTAX_ERROR).
         """
         record = FixRecord(
             build_id=build_id,
             fixed_files=frozenset(f for f in affected_files if f),
+            error_type=error_type,
         )
         with self._lock:
             self._evict_stale()
             self._fixes[build_id] = record
         logger.info(
-            "heal_verifier_recorded build_id=%s files=%s",
-            build_id, list(record.fixed_files),
+            "heal_verifier_recorded build_id=%s files=%s error_type=%s",
+            build_id, list(record.fixed_files), error_type,
         )
 
     def check_regression(
@@ -121,8 +125,16 @@ class HealVerifier:
                     "fixed_files":       list(record.fixed_files),
                     "overlap_files":     list(overlap),
                     "age_minutes":       age_minutes,
+                    "error_type":        record.error_type,
+                    "retry_count":       record.retry_count,
                 }
         return None
+
+    def increment_retry(self, original_build_id: str) -> None:
+        """Mark that one regression retry has been allowed for this fix record."""
+        with self._lock:
+            if original_build_id in self._fixes:
+                self._fixes[original_build_id].retry_count += 1
 
     def active_fixes(self) -> list[dict[str, Any]]:
         """Return all active (non-expired) fix records for monitoring."""

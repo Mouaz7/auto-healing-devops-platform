@@ -314,10 +314,34 @@ class PipelineMixin:
 
         A True return means the pipeline detected a regression loop and the
         caller must stop further processing to prevent an infinite repair cycle.
+
+        One retry is allowed when the new failure has the same error type as the
+        original fix — the AI may simply need another pass on the same problem.
+        A second regression on the same file is always blocked.
         """
         regression = heal_verifier.check_regression(build_id, analysis["affected_files"])
         if not regression:
             return False
+
+        original_error = regression.get("error_type", "")
+        new_error      = str(analysis.get("error_type", ""))
+        retry_count    = regression.get("retry_count", 0)
+
+        if original_error and original_error == new_error and retry_count == 0:
+            heal_verifier.increment_retry(regression["original_build_id"])
+            logger.info(
+                "regression_retry_allowed build_id=%s original=%s error_type=%s",
+                build_id, regression["original_build_id"], new_error,
+            )
+            audit.log(
+                "regression_retry_allowed",
+                build_id=build_id,
+                original_build=regression["original_build_id"],
+                error_type=new_error,
+                age_minutes=regression["age_minutes"],
+            )
+            return False
+
         audit.log(
             "regression_detected",
             build_id=build_id,
@@ -528,7 +552,7 @@ class PipelineMixin:
                     explanation=fix.get("explanation", ""),
                     report_data={**report_data, "fix_patch": fix.get("fix_patch", "")},
                 )
-            heal_verifier.record_fix(build_id, files_for_pr)
+            heal_verifier.record_fix(build_id, files_for_pr, error_type=str(analysis.get("error_type", "")))
         else:
             self.engine.advance(build_id, WorkflowStatus.BLOCKED)
 

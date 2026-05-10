@@ -405,6 +405,20 @@ class FixGenerator:
                 bugs_found = parsed.get("bugs_found", [])
                 explanation_text = parsed.get("explanation", "")
 
+                # Tier 0 fallback: parse AUTO-HEAL comments from fix_code (full-rewrite mode).
+                # In full-rewrite mode changed_lines is {} but the LLM adds inline
+                # "# AUTO-HEAL: was '...' (...) -> ..." comments on every fixed line.
+                # Parse them to rebuild both changed_lines and bugs_found.
+                if not bugs_found and not changed_lines and fix_code:
+                    import re as _re0
+                    _autoheal_pattern = _re0.compile(r"#\s*AUTO-HEAL:\s*(.+)")
+                    for lineno, line in enumerate(fix_code.splitlines(), 1):
+                        m = _autoheal_pattern.search(line)
+                        if m:
+                            desc = m.group(1).strip()
+                            changed_lines[str(lineno)] = line.rstrip()
+                            bugs_found.append(f"Line {lineno}: {desc[:160]}")
+
                 # Tier 1 fallback: synthesize from changed_lines (surgical mode).
                 # Each changed line is one bug; use its AUTO-HEAL inline comment as desc.
                 if not bugs_found and changed_lines:

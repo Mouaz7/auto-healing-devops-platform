@@ -116,7 +116,16 @@ EXAMPLE B — multi-bug fix that needs full rewrite
   "explanation": "Phase 1: JobQueue distributes work to N threads. Phase 2: 7 bugs — typo 'qeuue', missing colon on if-line, str+int concat, t.join missing parentheses, division by zero, target=fn(x) eager call, default mutable arg. Phase 3: bugs interact (typo + missing colon + thread spawn) so a surgical patch is unreliable; full rewrite is safer. Phase 4: returned a clean re-implementation that compiles, threads safely, and produces correct metrics.",
   "files_to_modify": ["src/jobqueue.py"],
   "confidence": 0.92,
-  "estimated_blast_radius": "LOW"
+  "estimated_blast_radius": "LOW",
+  "bugs_found": [
+    "typo 'qeuue' → 'queue'",
+    "missing colon on if-line",
+    "str+int concatenation error",
+    "t.join missing parentheses",
+    "division by zero in metrics",
+    "target=fn(x) eager call instead of target=fn",
+    "default mutable argument []"
+  ]
 }"""
 
 COMPLEX_SYSTEM_PROMPT = """\
@@ -387,10 +396,12 @@ INSTRUCTIONS:
   ✓ Keep the same function names and purpose
   ✓ Return correct values (-1 for not found, etc.)
 
-  OUTPUT: return JSON with fix_code AND a "bugs_found" list.
-  List EVERY bug you fixed as a separate string in bugs_found — one bug per entry.
-  Example: "bugs_found": ["missing colon after def", "arr[h+1] out-of-bounds → arr[h]", ...]
-  Do NOT leave bugs_found empty — if you fixed {bug_count} bugs, there must be {bug_count} entries."""
+  REQUIRED OUTPUT FIELDS:
+  - fix_code: complete corrected file
+  - bugs_found: NON-EMPTY list — one string per bug fixed
+    Example: ["missing colon after def", "arr[h+1] out-of-bounds → arr[h]", ...]
+    CRITICAL: bugs_found MUST match the number of bugs you fixed.
+    An empty bugs_found [] is INVALID — the response will be rejected."""
 
 MAX_FIX_LINES = 100          # Surgical mode: max lines changed
 MAX_FIX_LINES_COMPLEX = 600  # Complex mode: allow full file rewrite
