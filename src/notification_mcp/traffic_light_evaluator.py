@@ -1,114 +1,127 @@
 """Traffic light evaluator for Agent 6 (Review & Notify).
 
-Score formula:
-    final_score = (llm_confidence × 0.6) + (blast_radius_score × 0.4)
+Decision logic (agreed 2026-05-10):
 
-    blast_radius_score: LOW=1.0, MEDIUM=0.6, HIGH=0.2
+    Step 1 — RED overrides (any one triggers RED immediately):
+        • > 30 bugs in any single file  (file too broken for reliable AI fix)
+        • > 5 files affected            (change too wide, blast radius too high)
+        • AI confidence < 0.60          (AI itself is not sure)
 
-Traffic light thresholds (adaptive — self-calibrate per error type):
-    GREEN  ≥ adaptive_green   (default 0.85) — high confidence, fast-track review
-    YELLOW ≥ adaptive_yellow  (default 0.60) — medium confidence, careful review
-    RED    < adaptive_yellow                  — low confidence, fix blocked
+    Step 2 — YELLOW:
+        • 4–5 files affected AND ≤ 30 bugs per file AND confidence ≥ 0.60
+
+    Step 3 — GREEN:
+        • 1–3 files AND ≤ 30 bugs per file AND confidence ≥ 0.60
 
 Human-in-the-Loop (HITL) policy:
     ALL fixes — including GREEN — require explicit human approval before merging.
-    The traffic light colour signals how much scrutiny the reviewer should apply,
-    not whether the system is allowed to merge automatically. auto_merge_allowed
-    always returns False to reflect this policy.
-
-Safety override:
-    HIGH blast radius ALWAYS forces RED, regardless of confidence.
-    The risk of a wide-impact change outweighs any confidence score.
+    The colour signals how much scrutiny to apply, not autonomous action.
+    auto_merge_allowed always returns False.
 
 Adaptive thresholds:
-    The system records each human approve/reject decision and shifts the
-    per-error-type thresholds toward what humans actually accept (±safety margin).
-    After ≥5 decisions the thresholds self-calibrate automatically.
+    The 0.60 confidence floor self-calibrates per error type after ≥ 5 human
+    approve/reject decisions via adaptive_thresholds.
 """
 from __future__ import annotations
 
 from src.shared.adaptive_thresholds import adaptive_thresholds
 from src.shared.metrics import confidence_score, workflows_total
 from src.shared.models import (
-    BlastRadius,
     CodeFix,
     FailureAnalysis,
     TrafficLightColour,
     TrafficLightResult,
 )
 
-_BLAST_RADIUS_SCORES: dict[BlastRadius, float] = {
-    BlastRadius.LOW:    1.0,
-    BlastRadius.MEDIUM: 0.6,
-    BlastRadius.HIGH:   0.2,
-}
+MAX_BUGS_PER_FILE  = 30   # more than this in one file → RED
+MAX_FILES_RED      = 5    # more than this many files  → RED
+MAX_FILES_YELLOW   = 3    # more than this many files  → YELLOW (up to MAX_FILES_RED)
+MIN_CONFIDENCE     = 0.60 # below this → RED regardless of files/bugs
 
 
 def evaluate_traffic_light(
     code_fix: CodeFix,
     analysis: FailureAnalysis,
 ) -> TrafficLightResult:
-    """Compute a :class:`TrafficLightResult` from fix confidence and blast radius.
+    """Compute a TrafficLightResult using the file-count + bug-count + confidence rules."""
 
-    Per-error-type thresholds are fetched from adaptive_thresholds so the
-    system self-calibrates based on past human decisions.
-    HIGH blast radius always triggers the safety override (RED).
-    """
-    blast_score = _BLAST_RADIUS_SCORES[analysis.blast_radius]
-    final_score = round(code_fix.confidence * 0.6 + blast_score * 0.4, 4)
+    num_files  = len(analysis.affected_files) if analysis.affected_files else 1
+    num_bugs   = len(code_fix.bugs_found)
+    confidence = code_fix.confidence
 
-    # Safety override — HIGH blast radius is always blocked
-    if analysis.blast_radius == BlastRadius.HIGH:
-        confidence_score.labels(traffic_light=TrafficLightColour.RED.value).observe(final_score)
-        workflows_total.labels(status=TrafficLightColour.RED.value).inc()
-        return TrafficLightResult(
-            build_id=code_fix.build_id,
-            colour=TrafficLightColour.RED,
-            final_score=final_score,
-            auto_merge_allowed=False,
-            reason="Safety override: HIGH blast radius forces RED",
-            blast_radius=analysis.blast_radius,
-            safety_override=True,
-        )
+    # Bugs per file: distribute evenly as a worst-case estimate when we have
+    # only a flat bug list (not per-file breakdown).
+    bugs_per_file = num_bugs / max(num_files, 1)
 
-    # Adaptive (per-error-type) thresholds — learned from human decisions
+    # Fetch adaptive confidence floor per error type
     error_type_str = (
         analysis.error_type.value
         if hasattr(analysis.error_type, "value")
         else str(analysis.error_type)
     )
-    green_t, yellow_t = adaptive_thresholds.get_thresholds(error_type_str)
+    _, yellow_t = adaptive_thresholds.get_thresholds(error_type_str)
+    confidence_floor = max(MIN_CONFIDENCE, yellow_t)
 
-    if final_score >= green_t:
-        colour     = TrafficLightColour.GREEN
-        auto_merge = False   # HITL: human approval always required
-        reason     = (
-            f"High confidence — fix proposed for review "
-            f"(score {final_score:.0%}, threshold {green_t:.0%})"
-        )
-    elif final_score >= yellow_t:
-        colour     = TrafficLightColour.YELLOW
-        auto_merge = False
-        reason     = (
-            f"Medium confidence — careful human review required "
-            f"(score {final_score:.0%}, threshold {yellow_t:.0%})"
-        )
-    else:
-        colour     = TrafficLightColour.RED
-        auto_merge = False
-        reason     = (
-            f"Low confidence — fix blocked "
-            f"(score {final_score:.0%} below {yellow_t:.0%} threshold)"
-        )
+    blast_radius = analysis.blast_radius
 
+    # ------------------------------------------------------------------ #
+    # Step 1 — RED overrides (checked in priority order)                  #
+    # ------------------------------------------------------------------ #
+    if bugs_per_file > MAX_BUGS_PER_FILE:
+        reason = (
+            f"Too many bugs per file ({bugs_per_file:.0f} > {MAX_BUGS_PER_FILE}) — "
+            "file too broken for reliable AI fix"
+        )
+        return _result(code_fix, TrafficLightColour.RED, confidence, reason, blast_radius)
+
+    if num_files > MAX_FILES_RED:
+        reason = (
+            f"Too many files affected ({num_files} > {MAX_FILES_RED}) — "
+            "change scope too wide"
+        )
+        return _result(code_fix, TrafficLightColour.RED, confidence, reason, blast_radius)
+
+    if confidence < confidence_floor:
+        reason = (
+            f"AI confidence too low ({confidence:.0%} < {confidence_floor:.0%}) — "
+            "fix blocked"
+        )
+        return _result(code_fix, TrafficLightColour.RED, confidence, reason, blast_radius)
+
+    # ------------------------------------------------------------------ #
+    # Step 2 — YELLOW                                                      #
+    # ------------------------------------------------------------------ #
+    if num_files > MAX_FILES_YELLOW:
+        reason = (
+            f"{num_files} files affected — careful review required "
+            f"(confidence {confidence:.0%})"
+        )
+        return _result(code_fix, TrafficLightColour.YELLOW, confidence, reason, blast_radius)
+
+    # ------------------------------------------------------------------ #
+    # Step 3 — GREEN                                                       #
+    # ------------------------------------------------------------------ #
+    reason = (
+        f"High confidence fix — {num_files} file(s), "
+        f"{num_bugs} bug(s), confidence {confidence:.0%}"
+    )
+    return _result(code_fix, TrafficLightColour.GREEN, confidence, reason, blast_radius)
+
+
+def _result(
+    code_fix: CodeFix,
+    colour: TrafficLightColour,
+    final_score: float,
+    reason: str,
+    blast_radius,
+) -> TrafficLightResult:
     confidence_score.labels(traffic_light=colour.value).observe(final_score)
     workflows_total.labels(status=colour.value).inc()
-
     return TrafficLightResult(
         build_id=code_fix.build_id,
         colour=colour,
-        final_score=final_score,
-        auto_merge_allowed=auto_merge,
+        final_score=round(final_score, 4),
+        auto_merge_allowed=False,
         reason=reason,
-        blast_radius=analysis.blast_radius,
+        blast_radius=blast_radius,
     )

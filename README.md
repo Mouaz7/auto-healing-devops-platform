@@ -69,7 +69,7 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 | Control Mechanism | What it does | Code Location |
 |---|---|---|
 | **Human-in-the-Loop (enforced)** | Auto-merge permanently **disabled** for all confidence levels. GREEN = fast-track review, YELLOW = careful review. Both send Slack Approve/Reject buttons. | `src/orchestrator_mcp/github_mixin.py:94` |
-| **Transparent confidence score** | Every Slack notification shows the exact score and threshold: "High confidence — fix proposed for review (score 97%, threshold 85%)". | `src/notification_mcp/traffic_light_evaluator.py` |
+| **Traffic light (file + bug + confidence)** | 🟢 GREEN: 1–3 files, ≤30 bugs/file, confidence ≥60%. 🟡 YELLOW: 4–5 files. 🔴 RED: >5 files, >30 bugs/file, or confidence <60%. | `src/notification_mcp/traffic_light_evaluator.py` |
 | **BLOCKED-state notification** | Regression loops and 422-rejected fixes send Slack RED alert immediately — no silent failures. | `src/orchestrator_mcp/pipeline_mixin.py:200` |
 | **Bandit security scan** | Scans every generated fix for HIGH-severity issues. Triggers LLM retry with feedback. | `src/shared/quality_gates.py` |
 | **Pylint linting (real score)** | Real weighted score via `--output-format=json2`. Low score reduces confidence modifier (−0.20 or −0.40). | `src/shared/quality_gates.py` |
@@ -177,19 +177,21 @@ POST /tools/handle_build_failure
      • Retry on security issues (up to budget)
   │
   ▼  [Agent 6]  Evaluate & Notify
-     • Adaptive traffic light: confidence × 0.6 + blast_score × 0.4
-     • HIGH blast radius always forces 🔴 RED
+     • Traffic light based on: files affected + bugs per file + AI confidence
+     • 🟢 GREEN:  1–3 files  AND  ≤30 bugs/file  AND  confidence ≥ 60%
+     • 🟡 YELLOW: 4–5 files  AND  ≤30 bugs/file  AND  confidence ≥ 60%
+     • 🔴 RED:    >5 files   OR   >30 bugs/file  OR   confidence < 60%
   │
   ├─── 🟢 GREEN  ──► PR opened · Slack Approve / Reject buttons (fast-track)
-  │                  Score shown: "High confidence — fix proposed for review (97%)"
+  │                  e.g. "1 file, 14 bugs, confidence 93%"
   │                  Regression watch activated (60 min)
   │
   ├─── 🟡 YELLOW ──► PR opened · Slack Approve / Reject buttons (careful review)
-  │                  Score shown: "Medium confidence — careful review required (72%)"
+  │                  e.g. "4 files affected — careful review required (80%)"
   │                  Human decision feeds adaptive thresholds + fix memory
   │
   ├─── 🔴 RED    ──► No PR · BLOCKED · Slack RED alert sent immediately
-  │                  Score shown: "Low confidence — fix blocked (45% below 60%)"
+  │                  e.g. "Too many bugs per file (35 > 30) — file too broken"
   │                  Manual intervention required
   │
   └─── ⛔ BLOCKED ─► Regression loop OR 422 too-complex
@@ -207,9 +209,9 @@ Auto-merge is **permanently disabled** for all confidence levels. Every fix — 
 
 | Colour | What it means for the reviewer |
 |---|---|
-| 🟢 GREEN | High confidence — **fast-track review** recommended. Check the diff briefly and merge if it looks right. |
-| 🟡 YELLOW | Medium confidence — **careful review** required. Read the fix closely and consider testing locally. |
-| 🔴 RED | Low confidence or HIGH blast radius — **fix is blocked**, no PR created. Manual intervention required. |
+| 🟢 GREEN | 1–3 files, ≤30 bugs/file, confidence ≥60% — **fast-track review** recommended. Check the diff briefly and merge if it looks right. |
+| 🟡 YELLOW | 4–5 files, ≤30 bugs/file, confidence ≥60% — **careful review** required. Read the fix closely and consider testing locally. |
+| 🔴 RED | >5 files, >30 bugs/file, or confidence <60% — **fix is blocked**, no PR created. Manual intervention required. |
 
 The auto-merge code path is disabled at the source:
 
