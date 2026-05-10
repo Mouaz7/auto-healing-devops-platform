@@ -405,19 +405,26 @@ class FixGenerator:
                 bugs_found = parsed.get("bugs_found", [])
                 explanation_text = parsed.get("explanation", "")
 
-                # Tier 0 fallback: parse AUTO-HEAL comments from fix_code (full-rewrite mode).
-                # In full-rewrite mode changed_lines is {} but the LLM adds inline
-                # "# AUTO-HEAL: was '...' (...) -> ..." comments on every fixed line.
-                # Parse them to rebuild both changed_lines and bugs_found.
-                if not bugs_found and not changed_lines and fix_code:
+                # Tier 0: always parse AUTO-HEAL comments from fix_code.
+                # These are the most accurate descriptions — the LLM writes them
+                # inline on every changed line. They replace generic LLM bugs_found
+                # (e.g. repeated "SyntaxError: expected ':'" messages) when present.
+                if fix_code and not changed_lines:
                     import re as _re0
                     _autoheal_pattern = _re0.compile(r"#\s*AUTO-HEAL:\s*(.+)")
+                    _autoheal_bugs: list[str] = []
+                    _autoheal_lines: dict[str, str] = {}
                     for lineno, line in enumerate(fix_code.splitlines(), 1):
                         m = _autoheal_pattern.search(line)
                         if m:
                             desc = m.group(1).strip()
-                            changed_lines[str(lineno)] = line.rstrip()
-                            bugs_found.append(f"Line {lineno}: {desc[:160]}")
+                            _autoheal_lines[str(lineno)] = line.rstrip()
+                            _autoheal_bugs.append(f"Line {lineno}: {desc[:160]}")
+                    if _autoheal_bugs:
+                        # AUTO-HEAL descriptions are always preferred over generic
+                        # LLM bugs_found (e.g. repeated SyntaxError messages).
+                        bugs_found   = _autoheal_bugs
+                        changed_lines = _autoheal_lines
 
                 # Tier 1 fallback: synthesize from changed_lines (surgical mode).
                 # Each changed line is one bug; use its AUTO-HEAL inline comment as desc.

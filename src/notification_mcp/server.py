@@ -56,6 +56,7 @@ class NotificationMCPServer(MCPServiceBase):
             confidence=float(data.get("confidence", 0.5)),
             explanation=data.get("explanation", ""),
             files_to_modify=data.get("affected_files", []),
+            bugs_found=data.get("bugs_found", []),
         )
         analysis = FailureAnalysis(
             build_id=build_id,

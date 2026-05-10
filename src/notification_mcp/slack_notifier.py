@@ -106,26 +106,26 @@ async def send_slack_review_buttons(
     _filled      = score_pct // 10
     conf_bar     = _bar_fill * _filled + "⬜" * (10 - _filled)
 
-    # Build bug findings text — prefer bugs_found (AUTO-HEAL list), then scan_findings
+    # Show first 3 bugs — "View all" button handles the rest
+    _PREVIEW_COUNT = 3
     if bugs_found:
         bug_lines = []
-        for i, desc in enumerate(bugs_found[:10], 1):
+        for i, desc in enumerate(bugs_found[:_PREVIEW_COUNT], 1):
             bug_lines.append(f"{i}. 🔴 {desc[:140]}")
-        if len(bugs_found) > 10:
-            bug_lines.append(f"_...and {len(bugs_found) - 10} more (see PR for full list)_")
+        if len(bugs_found) > _PREVIEW_COUNT:
+            bug_lines.append(f"_...and {len(bugs_found) - _PREVIEW_COUNT} more_")
         bug_text = "\n".join(bug_lines)
     elif scan_findings:
         sev_icon = {"HIGH": "🔴", "MEDIUM": "🟡", "INFO": "🔵"}
         bug_lines = []
-        for i, f in enumerate(scan_findings[:8], 1):
+        for i, f in enumerate(scan_findings[:_PREVIEW_COUNT], 1):
             icon = sev_icon.get(f.get("severity", "HIGH"), "🔴")
-            fix_hint = f"  → Fix: {f['suggestion']}" if f.get("suggestion") else ""
             bug_lines.append(
-                f"{i}. {icon} *Line {f['line']}* — `{f['pattern']}` ({f.get('severity','HIGH')})\n"
-                f"   _{f['message'][:120]}_{fix_hint}"
+                f"{i}. {icon} *Line {f['line']}* — `{f['pattern']}`\n"
+                f"   _{f['message'][:100]}_"
             )
-        if len(scan_findings) > 8:
-            bug_lines.append(f"_...and {len(scan_findings) - 8} more bugs (see PR for full list)_")
+        if len(scan_findings) > _PREVIEW_COUNT:
+            bug_lines.append(f"_...and {len(scan_findings) - _PREVIEW_COUNT} more_")
         bug_text = "\n".join(bug_lines)
     else:
         bug_text = "_(No bugs identified)_"
@@ -191,7 +191,7 @@ async def send_slack_review_buttons(
         },
         {"type": "divider"},
 
-        # ── BUG LIST ────────────────────────────────────────────────────
+        # ── BUG LIST (preview) + "visa alla"-knapp ─────────────────────
         {
             "type": "section",
             "text": {
@@ -199,6 +199,18 @@ async def send_slack_review_buttons(
                 "text": f"🐛 *Bugs — {bug_count} found & fixed*\n{bug_text}",
             },
         },
+        *(
+            [{
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": f"🔍 Visa alla {bug_count} buggar på GitHub"},
+                    "url": pr_url,
+                    "action_id": "view_all_bugs",
+                }],
+            }]
+            if bug_count > 3 and pr_url else []
+        ),
         {"type": "divider"},
 
         # ── WHAT WAS FIXED ──────────────────────────────────────────────

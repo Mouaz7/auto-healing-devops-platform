@@ -427,6 +427,7 @@ class PipelineMixin:
                 "error_type":     analysis["error_type"],
                 "blast_radius":   analysis["blast_radius"],
                 "affected_files": analysis["affected_files"],
+                "bugs_found":     fix.get("bugs_found", []),
                 "elapsed_s":      elapsed_s,
             },
             headers=headers,
@@ -512,6 +513,8 @@ class PipelineMixin:
             "all_affected_files": analysis.get("affected_files", []),
             "fix_strategy":   fix.get("fix_strategy", ""),
             "bug_list":       fix.get("bug_list", []),
+            "verdict_reason": verdict.get("reason", ""),
+            "final_score":    verdict.get("final_score", fix.get("confidence", 0.0)),
             "bug_count":      (
                 len(bugs_found_final)
                 or len(fix.get("changed_lines", {}))

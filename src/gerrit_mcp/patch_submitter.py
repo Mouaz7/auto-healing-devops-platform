@@ -299,7 +299,8 @@ class PatchSubmitter:
             "RED":    "RED — Blocked",
         }.get(colour, colour)
 
-        confidence_bar = "█" * (score // 10) + "░" * (10 - score // 10)
+        _bar_fill      = {"GREEN": "🟩", "YELLOW": "🟨", "RED": "🟥"}.get(colour, "🟩")
+        confidence_bar = _bar_fill * (score // 10) + "⬜" * (10 - score // 10)
         files_str      = "\n".join(f"  - `{f}`" for f in all_files) or "  - _(unknown)_"
         bandit_str     = "\n".join(f"  - {b}" for b in bandit_issues) if bandit_issues else "  ✅ No security issues found"
         test_str       = "\n".join(f"  - {t}" for t in test_hints) if test_hints else "  _(no specific test hints)_"
@@ -416,10 +417,32 @@ class PatchSubmitter:
             bug_details_str = ""
 
         # --- Full file before/after ---
+        # Annotate the BEFORE file: parse AUTO-HEAL comments from the fixed code
+        # and match them to lines in the original using stripped content similarity.
         if orig_lines_list:
-            orig_full = "\n".join(orig_lines_list[:80])
+            _autoheal_re = _re.compile(r"#\s*AUTO-HEAL:\s*was '(.+?)'\s*(.+?)-> (.+)")
+            _bug_map: dict[int, str] = {}   # orig line index (0-based) → short bug desc
+            for fixed_line in (patch or "").splitlines():
+                m = _autoheal_re.search(fixed_line)
+                if not m:
+                    continue
+                old_snippet = m.group(1).strip()
+                fix_desc    = m.group(3).strip()[:60]
+                # Find the matching line in the original by content
+                for i, orig_line in enumerate(orig_lines_list):
+                    if old_snippet and old_snippet in orig_line:
+                        _bug_map[i] = fix_desc
+                        break
+
+            annotated = []
+            for i, line in enumerate(orig_lines_list[:80]):
+                if i in _bug_map:
+                    annotated.append(f"{line}  # ← BUG: {_bug_map[i]}")
+                else:
+                    annotated.append(line)
             if len(orig_lines_list) > 80:
-                orig_full += f"\n# ... ({len(orig_lines_list) - 80} more lines)"
+                annotated.append(f"# ... ({len(orig_lines_list) - 80} more lines)")
+            orig_full = "\n".join(annotated)
         else:
             orig_full = "# (original code unavailable)"
 
@@ -437,11 +460,11 @@ class PatchSubmitter:
             f"| Field | Value |\n"
             f"|-------|-------|\n"
             f"| **Build ID** | `{build_id}` |\n"
-            f"| **Confidence Score** | {score}% |\n"
             f"| **Traffic Light** | {emoji} {colour_label} |\n"
+            f"| **Confidence Score** | {score}% {confidence_bar} |\n"
+            f"| **Decision Reason** | {rd.get('verdict_reason') or '—'} |\n"
             f"| **Error Type** | `{error_t}` |\n"
             f"| **Blast Radius** | `{blast or '—'}` |\n"
-            f"| **Complexity** | {complexity or '—'} |\n"
             f"| **Bugs Found** | {bug_count} |\n"
             f"| **AI Attempts** | {attempts} |\n"
             f"| **Model** | `{model_used}` |\n"
