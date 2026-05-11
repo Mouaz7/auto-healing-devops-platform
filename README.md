@@ -152,6 +152,90 @@ Supporting services:
 
 > **Note on numbering:** Agents 1 and 2 are *trigger* agents that run independently — Agent 1 watches Jenkins, Agent 2 watches issue trackers. When either detects work, they hand off to the **Orchestrator**, which then runs the **in-pipeline agents 3 → 4 → 5 → 6** with two in-process helpers (Architecture Classifier, Diff Bug Counter) and a supporting service (Gerrit MCP for PR creation).
 
+### Agents in Detail
+
+#### 🔭 Agent 1 — Pipeline Monitor (`jenkins-mcp`)
+
+**Purpose:** Watch Jenkins for failed builds and pull their raw logs.
+
+| Aspect | Details |
+|---|---|
+| Code | `src/jenkins_mcp/server.py` (`JenkinsMCPServer`) |
+| Endpoint | `GET /tools/fetch_log?job=<job>&build=<build>` |
+| Trigger | Polled by orchestrator on every webhook hit, OR called directly when GitHub Actions sends a build failure |
+| Output | Raw multi-MB build log → handed to Agent 3 (Log Analyst) |
+
+#### 🧭 Agent 2 — Task Inspector (`scheduler`)
+
+**Purpose:** Classify incoming tasks (GitHub Issues, Jira tickets, comments) into one of three scenarios so the orchestrator knows whether to route them to the bug-fix or feature-development path.
+
+| Aspect | Details |
+|---|---|
+| Code | `src/scheduler/task_classifier.py` (`TaskClassifier`) + `src/scheduler/monitor.py` |
+| Container | `scheduler` (defined in `docker-compose.yml`, runs `python -m src.scheduler.monitor`) |
+| Polling | GitHub Issues / Jira every `SCHEDULE_INTERVAL_MINUTES` (default 15 min) |
+| Strategy | 4-stage escalating latency: regex → primary LLM → fallback chain → YELLOW fallback |
+| LLM | NIM PRIMARY = `gemma-4-31b-it`; fallback chain FB1 → FB2 → FB3 |
+
+**Classification output:**
+
+| Scenario | Trigger | Action |
+|---|---|---|
+| **A** = `BUG_FIX_FROM_COMMENT` | Error keywords (`Traceback`, `Error:`, `Exception`, `crash`, `fix`) or stack-trace patterns | Route to bug-fix pipeline |
+| **B** = `AUTONOMOUS_DEVELOPMENT` | Feature keywords (`add`, `create`, `implement`, `enhancement`) without error signals | Route to feature pipeline |
+| **YELLOW** = `YELLOW_MANUAL` | Ambiguous text or all LLM calls failed | Send to Slack for human classification |
+
+**Also runs:** Daily Slack digest at 08:00 UTC (`src/scheduler/daily_digest.py`) — builds processed, success rates, top error types, troubled files, threshold adaptations, regression watch status.
+
+#### 🧹 Agent 3 — Log Analyst (`log-cleaner-mcp`)
+
+**Purpose:** Compress noisy multi-MB logs to ~2 KB before the LLM ever sees them.
+
+| Aspect | Details |
+|---|---|
+| Code | `src/log_cleaner_mcp/pipeline.py` + `filters/` |
+| Stages | 5-stage deterministic pipeline: ANSI → timestamps → dedup → noise → stack-trace extract |
+| LLM fallback | If reduction < 50%, prompt LLM to summarise |
+| Typical result | 40 KB log → ~2 KB (~95% reduction) |
+
+#### 🧠 Agent 4 — Error Analyst (`knowledge-graph-mcp`)
+
+**Purpose:** Identify what went wrong and which files are affected.
+
+| Aspect | Details |
+|---|---|
+| Code | `src/knowledge_graph_mcp/failure_analyser.py` (`FailureAnalyser`) |
+| Detection | Regex per error type (zero latency) → LLM fallback for unmatched cases |
+| Error types | 11 (`SYNTAX_ERROR`, `TYPE_ERROR`, `IMPORT_ERROR`, `ASSERTION_ERROR`, `FILE_NOT_FOUND`, `ATTRIBUTE_ERROR`, `NAME_ERROR`, `VALUE_ERROR`, `KEY_ERROR`, `INDEX_ERROR`, `ZERO_DIVISION_ERROR`) + `UNKNOWN` |
+| Blast radius | LOW (1 file) / MEDIUM (2–5) / HIGH (6+) |
+| Output | `FailureAnalysis(error_type, blast_radius, affected_files, root_cause, confidence)` |
+
+#### 🛠️ Agent 5 — Code Repairer (`llm-mcp`)
+
+**Purpose:** Generate the actual fix.
+
+| Aspect | Details |
+|---|---|
+| Code | `src/llm_mcp/fix_generator.py` (`FixGenerator`) |
+| Pre-LLM | 63-pattern AST scanner (`bug_scanner.py`) annotates code with bug locations injected into the prompt |
+| Strategy | Surgical patch (small fix) OR full rewrite (multi-bug) — chosen by complexity score |
+| Retry budget | 6 attempts (≤2 bugs) · 8 (3–9) · 14 (10–40) — scales with bug density |
+| Quality gates | Bandit (HIGH severity blocks) · Pylint (low score reduces confidence) · secret scanner (11 patterns) |
+| AUTO-HEAL annotations | Every changed line gets `# AUTO-HEAL: was '...' (bug type) -> fix` inline |
+| Output | `CodeFix(fix_patch, confidence, explanation, bugs_found, model_used, regression_risk, test_hints)` |
+
+#### 📨 Agent 6 — Review & Notify (`notification-mcp`)
+
+**Purpose:** Decide the traffic light, send notifications, handle slash commands.
+
+| Aspect | Details |
+|---|---|
+| Code | `src/notification_mcp/traffic_light_evaluator.py` + `slack_notifier.py` + `slack_slash_handler.py` |
+| Decision | File count + bugs/file + AI confidence (no opaque score formula) |
+| Notifications | Slack (Block Kit with emoji bars 🟩🟨🟥) + Teams |
+| Slash commands | 9 commands (`status`, `list`, `stats`, `retry`, `explain`, `rollback`, `history`, `top`, `thresholds`) + `help` fallback |
+| Build-ID parsing | Strips `build`, `#`, `id:` prefixes so `/autoheal status build 12345` and `/autoheal status 12345` both work |
+
 ---
 
 ## 3. Pipeline Flow
