@@ -95,18 +95,77 @@ def _get_engine():
 # ---------------------------------------------------------------------------
 
 def _cmd_status(arg: str) -> dict:
+    """Look up build status. Falls back to fix_memory (persistent disk storage)
+    when the in-memory WorkflowEngine doesn't have the build — covers the case
+    where the orchestrator was restarted after the build completed."""
     build_id = clean_build_id(arg)
     engine = _get_engine()
     try:
         state = engine.get(build_id) if engine and build_id else None
     except Exception:  # pylint: disable=broad-exception-caught
         state = None
+
+    # Fallback: check persistent fix_memory if engine doesn't have it
+    if state is None and build_id:
+        from src.shared.fix_memory import fix_memory
+        from datetime import datetime
+        for rec in reversed(fix_memory._load_records()):  # pylint: disable=protected-access
+            if rec.get("build_id") == build_id and not rec.get("_update"):
+                outcome = rec.get("outcome", "UNKNOWN")
+                approved = rec.get("approved")
+                if approved is True:
+                    status_val = "COMPLETED"
+                elif approved is False:
+                    status_val = "BLOCKED"
+                else:
+                    status_val = "AWAITING_REVIEW"
+                ts_str = rec.get("ts", "")
+                try:
+                    ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    ts_dt = None
+                from types import SimpleNamespace
+                state = SimpleNamespace(
+                    status=SimpleNamespace(value=status_val),
+                    updated_at=ts_dt,
+                    error_message=f"Outcome: {outcome} ({int(rec.get('confidence', 0)*100)}% confidence)",
+                )
+                break
     return status_response(build_id, state)
 
 
 def _cmd_list() -> dict:
+    """List active workflows from engine, or recent fixes from disk if engine is empty."""
     engine = _get_engine()
-    return list_response(engine.list_active() if engine else [])
+    workflows = engine.list_active() if engine else []
+
+    # Fallback: show last 10 from fix_memory when engine is empty (post-restart)
+    if not workflows:
+        from src.shared.fix_memory import fix_memory
+        from datetime import datetime
+        from types import SimpleNamespace
+        seen: set[str] = set()
+        recent = []
+        for rec in reversed(fix_memory._load_records()):  # pylint: disable=protected-access
+            bid = rec.get("build_id")
+            if not bid or bid in seen or rec.get("_update"):
+                continue
+            seen.add(bid)
+            approved = rec.get("approved")
+            if approved is True:
+                status_val = "COMPLETED"
+            elif approved is False:
+                status_val = "BLOCKED"
+            else:
+                status_val = "AWAITING_REVIEW"
+            recent.append(SimpleNamespace(
+                build_id=bid,
+                status=SimpleNamespace(value=status_val),
+            ))
+            if len(recent) >= 10:
+                break
+        workflows = recent
+    return list_response(workflows)
 
 
 def _cmd_stats() -> dict:

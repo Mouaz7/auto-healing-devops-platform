@@ -140,6 +140,8 @@ services:
     env_file: .env
     ports:
       - "8085:8085"
+    volumes:
+      - autoheal-data:/var/log/auto-healer
     environment:
       - SERVICE_NAME=orchestrator
       - SERVICE_PORT=8085
@@ -215,6 +217,8 @@ services:
     env_file: .env
     ports:
       - "8087:8087"
+    volumes:
+      - autoheal-data:/var/log/auto-healer
     environment:
       - SERVICE_NAME=notification
       - SERVICE_PORT=8087
@@ -275,3 +279,7 @@ services:
 networks:
   agent-network:
     driver: bridge
+
+volumes:
+  autoheal-data:
+    driver: local
