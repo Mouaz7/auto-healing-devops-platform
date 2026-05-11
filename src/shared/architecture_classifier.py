@@ -885,6 +885,7 @@ def classify(
 
     # 3. Error message hints
     if error_message:
+        error_message = str(error_message)
         for layer, hints in _ERROR_HINTS.items():
             for hint in hints:
                 if hint.lower() in error_message.lower():

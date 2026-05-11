@@ -422,17 +422,46 @@ class FixGenerator:
                 # These are the most accurate descriptions — the LLM writes them
                 # inline on every changed line. They replace generic LLM bugs_found
                 # (e.g. repeated "SyntaxError: expected ':'" messages) when present.
+                #
+                # Grouping: multiple AUTO-HEAL lines inside the same function are
+                # one logical bug (e.g. both sides of a binary-search off-by-one fix).
+                # We keep only the first entry per enclosing function so that the
+                # reported bug count matches the number of logical bugs, not changed lines.
                 if fix_code and not changed_lines:
+                    import ast as _ast0
                     import re as _re0
                     _autoheal_pattern = _re0.compile(r"#\s*AUTO-HEAL:\s*(.+)")
                     _autoheal_bugs: list[str] = []
                     _autoheal_lines: dict[str, str] = {}
+
+                    # Build line → enclosing-function-scope map from the fix code.
+                    _fn_scopes: dict[int, str] = {}
+                    try:
+                        _tree = _ast0.parse(fix_code)
+                        for _node in _ast0.walk(_tree):
+                            if isinstance(_node, (_ast0.FunctionDef, _ast0.AsyncFunctionDef)):
+                                _end = getattr(_node, "end_lineno", _node.lineno)
+                                for _ln in range(_node.lineno, _end + 1):
+                                    _fn_scopes[_ln] = f"{_node.name}:{_node.lineno}"
+                    except SyntaxError:
+                        pass  # fall back to per-line counting below
+
+                    _seen_scopes: set[str] = set()
                     for lineno, line in enumerate(fix_code.splitlines(), 1):
                         m = _autoheal_pattern.search(line)
-                        if m:
-                            desc = m.group(1).strip()
-                            _autoheal_lines[str(lineno)] = line.rstrip()
-                            _autoheal_bugs.append(f"Line {lineno}: {desc[:160]}")
+                        if not m:
+                            continue
+                        desc = m.group(1).strip()
+                        _autoheal_lines[str(lineno)] = line.rstrip()
+                        scope = _fn_scopes.get(lineno)
+                        if scope:
+                            if scope in _seen_scopes:
+                                # Same function already has a representative entry —
+                                # this line is part of the same logical bug; skip it.
+                                continue
+                            _seen_scopes.add(scope)
+                        _autoheal_bugs.append(f"Line {lineno}: {desc[:160]}")
+
                     if _autoheal_bugs:
                         # AUTO-HEAL descriptions are always preferred over generic
                         # LLM bugs_found (e.g. repeated SyntaxError messages).
@@ -440,12 +469,33 @@ class FixGenerator:
                         changed_lines = _autoheal_lines
 
                 # Tier 1 fallback: synthesize from changed_lines (surgical mode).
-                # Each changed line is one bug; use its AUTO-HEAL inline comment as desc.
+                # Group lines that belong to the same function into one logical bug,
+                # matching the same deduplication logic used in Tier 0.
                 if not bugs_found and changed_lines:
+                    import ast as _ast1
+                    _fn_scopes_t1: dict[int, str] = {}
+                    if fix_code:
+                        try:
+                            _tree1 = _ast1.parse(fix_code)
+                            for _node1 in _ast1.walk(_tree1):
+                                if isinstance(_node1, (_ast1.FunctionDef, _ast1.AsyncFunctionDef)):
+                                    _end1 = getattr(_node1, "end_lineno", _node1.lineno)
+                                    for _ln1 in range(_node1.lineno, _end1 + 1):
+                                        _fn_scopes_t1[_ln1] = f"{_node1.name}:{_node1.lineno}"
+                        except SyntaxError:
+                            pass
+
+                    _seen_scopes_t1: set[str] = set()
                     for lineno_str, new_code in sorted(
                         changed_lines.items(),
                         key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0,
                     ):
+                        ln_int = int(lineno_str) if str(lineno_str).isdigit() else 0
+                        scope_t1 = _fn_scopes_t1.get(ln_int)
+                        if scope_t1:
+                            if scope_t1 in _seen_scopes_t1:
+                                continue
+                            _seen_scopes_t1.add(scope_t1)
                         comment = ""
                         if "# AUTO-HEAL:" in new_code:
                             comment = new_code.split("# AUTO-HEAL:", 1)[1].strip()

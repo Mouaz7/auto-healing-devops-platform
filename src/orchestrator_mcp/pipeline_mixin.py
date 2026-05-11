@@ -222,7 +222,7 @@ class PipelineMixin:
         layer_result = _classify_layer(
             affected_files=analysis.get("affected_files", []),
             code_context=code_context,
-            error_message=cleaned or analysis.get("root_cause", ""),
+            error_message=cleaned or str(analysis.get("root_cause", "") or ""),
         )
         analysis["arch_layer"]      = layer_result.layer.value
         analysis["arch_confidence"] = layer_result.confidence
