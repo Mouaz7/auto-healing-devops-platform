@@ -463,6 +463,13 @@ class PatchSubmitter:
             f"| **Traffic Light** | {emoji} {colour_label} |\n"
             f"| **Confidence Score** | {score}% {confidence_bar} |\n"
             f"| **Decision Reason** | {rd.get('verdict_reason') or '—'} |\n"
+            f"| **Architecture Layer** | { {'FRONTEND':'🎨 Frontend','BACKEND':'⚙️ Backend','DATABASE':'🗄️ Database','INFRA':'🐳 Infra','TESTS':'🧪 Tests','MOBILE':'📱 Mobile','DATA_ML':'🧠 Data/ML','UNKNOWN':'❓ Unknown'}.get(rd.get('arch_layer','UNKNOWN'),'❓ Unknown') } ({int(rd.get('arch_confidence',0)*100)}% conf)"
+            f"{(' · ' + rd['arch_sub_layer']) if rd.get('arch_sub_layer') else ''}"
+            f"{(' · ' + rd['arch_framework']) if rd.get('arch_framework') else ''}"
+            f"{(' · ' + rd['arch_language']) if rd.get('arch_language') else ''}"
+            f"{(' on ' + rd['arch_runtime']) if rd.get('arch_runtime') else ''}"
+            f"{(' · 🔗 also: ' + ', '.join(rd['arch_cross_layers'])) if rd.get('arch_cross_layers') else ''}"
+            f"{(' · ⚠️ +' + str(int(rd['arch_severity']*100)) + '% risk') if rd.get('arch_severity', 0) >= 0.15 else ''} |\n"
             f"| **Error Type** | `{error_t}` |\n"
             f"| **Blast Radius** | `{blast or '—'}` |\n"
             f"| **Bugs Found** | {bug_count} |\n"
@@ -514,7 +521,7 @@ class PatchSubmitter:
 
             f"---\n\n"
             f"## ⚠️ Regression Risk\n\n"
-            f"{regression or '_(no regression risk identified)_'}\n\n"
+            f"{regression or rd.get('arch_risk_note') or '_(no regression risk identified)_'}\n\n"
 
             f"---\n\n"
             f"## 🧪 Test Recommendations\n\n"

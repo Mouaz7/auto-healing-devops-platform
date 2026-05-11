@@ -216,6 +216,31 @@ class PipelineMixin:
                 "Blocking to prevent an infinite repair loop. Manual review required.",
             )
         code_context = await self._step_fetch_context(client, repo, analysis, raw_log)
+
+        # Architecture layer classification — guides the AI's fix strategy.
+        from src.shared.architecture_classifier import classify as _classify_layer
+        layer_result = _classify_layer(
+            affected_files=analysis.get("affected_files", []),
+            code_context=code_context,
+            error_message=cleaned or analysis.get("root_cause", ""),
+        )
+        analysis["arch_layer"]      = layer_result.layer.value
+        analysis["arch_confidence"] = layer_result.confidence
+        analysis["arch_risk_note"]  = layer_result.risk_note
+        analysis["arch_fix_hint"]   = layer_result.fix_hint
+        analysis["arch_sub_layer"]  = layer_result.sub_layer
+        analysis["arch_framework"]  = layer_result.framework
+        analysis["arch_language"]   = layer_result.language
+        analysis["arch_runtime"]    = layer_result.runtime
+        analysis["arch_cross_layers"] = layer_result.cross_layers or []
+        analysis["arch_tags"]       = layer_result.tags or []
+        analysis["arch_severity"]   = layer_result.severity_boost
+        logger.info(
+            "arch_layer_classified build_id=%s layer=%s sub=%s framework=%s confidence=%.2f",
+            build_id, layer_result.layer.value, layer_result.sub_layer,
+            layer_result.framework, layer_result.confidence,
+        )
+
         fix = await self._step_generate_fix(
             client, build_id, analysis, cleaned, code_context, headers,
         )
@@ -477,6 +502,8 @@ class PipelineMixin:
                 "root_cause":     analysis["root_cause"],
                 "cleaned_logs":   cleaned["cleaned_logs"],
                 "code_context":   code_context,
+                "arch_layer":     analysis.get("arch_layer", "UNKNOWN"),
+                "arch_fix_hint":  analysis.get("arch_fix_hint", ""),
             },
             headers=headers,
             timeout=LLM_FIX_TIMEOUT,
@@ -594,6 +621,16 @@ class PipelineMixin:
             "bug_list":       fix.get("bug_list", []),
             "verdict_reason": verdict.get("reason", ""),
             "final_score":    verdict.get("final_score", fix.get("confidence", 0.0)),
+            "arch_layer":     analysis.get("arch_layer", "UNKNOWN"),
+            "arch_confidence": analysis.get("arch_confidence", 0.0),
+            "arch_risk_note": analysis.get("arch_risk_note", ""),
+            "arch_sub_layer": analysis.get("arch_sub_layer", ""),
+            "arch_framework": analysis.get("arch_framework", ""),
+            "arch_language":  analysis.get("arch_language", ""),
+            "arch_runtime":   analysis.get("arch_runtime", ""),
+            "arch_cross_layers": analysis.get("arch_cross_layers", []),
+            "arch_tags":      analysis.get("arch_tags", []),
+            "arch_severity":  analysis.get("arch_severity", 0.0),
             "bug_count":      (
                 # Diff-based count is authoritative — we count the actual changes.
                 # Fall back to LLM/scanner counts only when diff is unavailable.

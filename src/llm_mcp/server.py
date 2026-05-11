@@ -66,6 +66,8 @@ class LLMMCPServer(MCPServiceBase):
                 analysis=analysis,
                 code_context=data.get("code_context", ""),
                 cleaned_logs=data.get("cleaned_logs", ""),
+                arch_layer=data.get("arch_layer", ""),
+                arch_fix_hint=data.get("arch_fix_hint", ""),
             )
         except RuntimeError as exc:
             return web.json_response({"error": str(exc)}, status=503)

@@ -32,18 +32,20 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 3. [Pipeline Flow](#3-pipeline-flow)
 4. [Control Mechanisms (RQ2)](#4-control-mechanisms-rq2)
 5. [Traffic Light Safety System](#5-traffic-light-safety-system)
-6. [Workflow State Machine](#6-workflow-state-machine)
-7. [AI Model System](#7-ai-model-system)
-8. [AI Memory & Learning](#8-ai-memory--learning)
-9. [Log Processing Pipeline](#9-log-processing-pipeline)
-10. [Observability & Monitoring](#10-observability--monitoring)
-11. [GitHub PR Report](#11-github-pr-report)
-12. [Slack Integration](#12-slack-integration)
-13. [Test Suite](#13-test-suite)
-13. [Installation & Setup](#13-installation--setup)
-14. [Environment Variables](#14-environment-variables)
-15. [Project Structure](#15-project-structure)
-16. [Authors](#16-authors)
+6. [Architecture Layer Classifier](#6-architecture-layer-classifier)
+7. [Workflow State Machine](#7-workflow-state-machine)
+8. [AI Model System](#8-ai-model-system)
+9. [AI Memory & Learning](#9-ai-memory--learning)
+10. [Proactive Bug Scanner](#10-proactive-bug-scanner-agent-5)
+11. [Log Processing Pipeline](#11-log-processing-pipeline)
+12. [Observability & Monitoring](#12-observability--monitoring)
+13. [GitHub PR Report](#13-github-pr-report)
+14. [Slack Integration](#14-slack-integration)
+15. [Test Suite](#15-test-suite)
+16. [Installation & Setup](#16-installation--setup)
+17. [Environment Variables](#17-environment-variables)
+18. [Project Structure](#18-project-structure)
+19. [Authors](#19-authors)
 
 ---
 
@@ -70,6 +72,7 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 |---|---|---|
 | **Human-in-the-Loop (enforced)** | Auto-merge permanently **disabled** for all confidence levels. GREEN = fast-track review, YELLOW = careful review. Both send Slack Approve/Reject buttons. | `src/orchestrator_mcp/github_mixin.py:94` |
 | **Traffic light (file + bug + confidence)** | 🟢 GREEN: 1–3 files, ≤30 bugs/file, confidence ≥60%. 🟡 YELLOW: 4–5 files. 🔴 RED: >5 files, >30 bugs/file, or confidence <60%. | `src/notification_mcp/traffic_light_evaluator.py` |
+| **Architecture-aware fix strategy** | Classifies failing code into 7 layers (frontend/backend/database/infra/tests/mobile/data-ml) across 152 frameworks and 82 languages. Layer-specific guidance injected into the AI prompt. DB migrations get +30% severity, auth code +30%, K8s +20%. | `src/shared/architecture_classifier.py` |
 | **BLOCKED-state notification** | Regression loops and 422-rejected fixes send Slack RED alert immediately — no silent failures. | `src/orchestrator_mcp/pipeline_mixin.py:200` |
 | **Bandit security scan** | Scans every generated fix for HIGH-severity issues. Triggers LLM retry with feedback. | `src/shared/quality_gates.py` |
 | **Pylint linting (real score)** | Real weighted score via `--output-format=json2`. Low score reduces confidence modifier (−0.20 or −0.40). | `src/shared/quality_gates.py` |
@@ -329,7 +332,117 @@ The same diff feeds the traffic-light evaluator, the PR report, and Slack — th
 
 ---
 
-## 6. Workflow State Machine
+## 6. Architecture Layer Classifier
+
+Before generating a fix, the system classifies the failing code's place in the architecture so the AI can apply layer-appropriate strategies (`src/shared/architecture_classifier.py`).
+
+### What it detects
+
+| Dimension | Possible values |
+|---|---|
+| 🏛️ **Layer** (7 + Unknown) | 🎨 FRONTEND · ⚙️ BACKEND · 🗄️ DATABASE · 🐳 INFRA · 🧪 TESTS · 📱 MOBILE · 🧠 DATA_ML |
+| 📌 **Sub-layer** (55 patterns) | API endpoint · Middleware · Auth · Migration · Schema/DDL · K8s workload · CI/CD pipeline · React hook · Form · Model training · ... |
+| 📦 **Framework** (152 supported) | React, Vue, Next.js, FastAPI, Django, Spring Boot, Gin, Actix, Rails, Laravel, Phoenix, PostgreSQL, Prisma, Kubernetes, Terraform, PyTorch, TensorFlow, Flutter, SwiftUI, ... |
+| 💻 **Language** (82 supported) | Python, TypeScript, Go, Rust, Java, Kotlin, Swift, Dart, Ruby, PHP, Elixir, Haskell, Solidity, ... |
+| ⚙️ **Runtime** | CPython, Node.js, JVM, .NET, Apple LLVM, Go runtime, BEAM, EVM, ... |
+| 🔗 **Cross-layers** | Secondary layers also implicated (e.g. backend API hitting a DB error) |
+| ⚠️ **Severity boost** | 0–30% extra caution for high-risk areas |
+
+### How it works — 3 weighted signals
+
+```
+1. Path patterns       (weight 3.0) — most reliable
+   ↓
+2. Content / imports   (weight 2.0) — second-most reliable
+   ↓
+3. Error message       (weight 1.5) — fallback
+   ↓
+4. Strong overrides    (weight 3.0) — definitive imports (e.g. 'react-native' → MOBILE)
+```
+
+The highest-scoring layer wins. Secondary layers with score ≥ 1.5 are reported as cross-layer involvement.
+
+### Severity boosts — extra caution for high-risk areas
+
+| Sub-layer | Boost | Why |
+|---|---|---|
+| Migration | +30% | Schema changes are often irreversible |
+| Schema / DDL | +30% | Database structure changes |
+| Auth / Security | +30% | Vulnerability surface |
+| Trigger / Stored proc | +25% | Hidden execution paths |
+| CDC / Streaming | +25% | Event-loss risk |
+| Kubernetes workload | +20% | Pod restart implications |
+| Infrastructure-as-code | +20% | Resource provisioning |
+| CI/CD pipeline | +20% | Blocks all future builds |
+| Load balancer / Proxy | +20% | Traffic routing risk |
+| API endpoint | +15% | Contract breakage |
+| Model training | +15% | Reproducibility concerns |
+
+### Example classifications
+
+```
+FastAPI API endpoint:
+  → BACKEND (100%) · API endpoint · FastAPI · Python · on CPython · ⚠️+15%
+
+Django migration affecting Postgres:
+  → BACKEND (100%) · Django · Python · 🔗 also: DATABASE
+
+Postgres SQL migration:
+  → DATABASE (100%) · Schema/DDL · SQL · ⚠️+30%
+
+React Native mobile screen:
+  → MOBILE (100%) · React Native · TypeScript · 🔗 also: FRONTEND
+
+Flutter widget:
+  → MOBILE (100%) · Flutter widget · Flutter · Dart · on Dart VM
+
+Kubernetes Deployment:
+  → INFRA (100%) · Kubernetes workload · Kubernetes · YAML · ⚠️+20%
+
+Airflow DAG:
+  → DATA_ML (100%) · Airflow · Python · 🔗 also: BACKEND
+
+Elixir Phoenix controller:
+  → BACKEND (100%) · Phoenix · Elixir · on BEAM
+```
+
+### What it changes in the pipeline
+
+1. **AI prompt** — layer-specific guidance is injected before the bug context:
+   > *"Framework: FastAPI. [API endpoint] Backend code: focus on input validation, error handling, and concurrency. PRESERVE THE API CONTRACT — request/response shapes, status codes, and field names must remain unchanged."*
+
+2. **PR Report** — Architecture Layer row in the Summary table:
+   ```
+   | Architecture Layer | ⚙️ Backend (100% conf) · API endpoint · FastAPI · Python on CPython · 🔗 also: DATABASE · ⚠️ +15% risk |
+   ```
+
+3. **Slack notification** — dedicated Architecture section with risk note:
+   ```
+   🏛️ Architecture — ⚙️ Backend · API endpoint · `FastAPI` · `Python` on `CPython`
+   _API contract may have changed — all consuming clients should be re-tested._
+   ```
+
+4. **Regression Risk fallback** — if the LLM doesn't produce one, the layer-specific risk note is used (e.g. for DB migrations: *"⚠️ HIGH RISK — schema changes can be irreversible. Run on staging first, verify backups exist, prepare rollback SQL."*)
+
+### Why this matters
+
+Different layers carry different bug profiles and different risks:
+
+| Layer | Typical bugs | Risk profile |
+|---|---|---|
+| 🎨 Frontend | State, props, rendering, async race | Visual, often isolated — low blast radius |
+| ⚙️ Backend | API contract, validation, concurrency | All clients affected — high blast radius |
+| 🗄️ Database | Migrations, foreign keys, indexing | Data integrity — **highest risk** |
+| 🐳 Infra | Docker, CI/CD, environment | Build/deploy blocking |
+| 🧪 Tests | Assertions, mocks, fixtures | Safe to fix — lowest risk |
+| 📱 Mobile | Platform APIs, lifecycle | Requires multi-device testing |
+| 🧠 Data/ML | Training, inference, pipelines | Model drift, reproducibility |
+
+The classifier ensures a database migration is treated with more respect than a frontend button — just like a human reviewer would.
+
+---
+
+## 7. Workflow State Machine
 
 ```
 PENDING
@@ -353,7 +466,7 @@ Any state ──► FAILED  (on unhandled agent exception)
 
 ---
 
-## 7. AI Model System
+## 8. AI Model System
 
 ### NVIDIA NIM — 4-Model Fallback Chain
 
@@ -390,7 +503,7 @@ Per-build API cost estimated from model size tiers. Warns when a single build ex
 
 ---
 
-## 8. AI Memory & Learning
+## 9. AI Memory & Learning
 
 ### Fix Memory (`src/shared/fix_memory.py`)
 
@@ -426,7 +539,7 @@ The retry counter is stored per fix record. After the 60-minute window expires, 
 
 ---
 
-## 9. Proactive Bug Scanner (Agent 5)
+## 10. Proactive Bug Scanner (Agent 5)
 
 ### 63-Pattern AST Scanner (`src/llm_mcp/bug_scanner.py`)
 
@@ -461,7 +574,7 @@ STATIC BUG SCAN — 3 PATTERN(S) DETECTED
 
 ---
 
-## 10. Log Processing Pipeline
+## 11. Log Processing Pipeline
 
 ### Agent 3 — 5-Stage Deterministic Pipeline
 
@@ -481,7 +594,7 @@ Second compression before LLM calls in Agent 5: keeps error lines + 2-line conte
 
 ---
 
-## 11. Observability & Monitoring
+## 12. Observability & Monitoring
 
 ### Prometheus Metrics (`/metrics` on every service)
 
@@ -516,7 +629,7 @@ Independent breaker per service: NIM API, GitHub API, Slack, Teams.
 
 ---
 
-## 11. GitHub PR Report
+## 13. GitHub PR Report
 
 Every auto-heal fix opens a GitHub Pull Request with a detailed structured report. All content is in **English**.
 
@@ -567,7 +680,7 @@ This makes it immediately clear **what was wrong on which line** and **exactly w
 
 ---
 
-## 12. Slack Integration
+## 14. Slack Integration
 
 ### GREEN & YELLOW — Detailed Review Message (HITL Enforced)
 
@@ -728,7 +841,7 @@ Every morning at 08:00 UTC: builds processed, success rates, top error types, tr
 
 ---
 
-## 13. Test Suite
+## 15. Test Suite
 
 **653 tests passing** · 9 pre-existing failures in blast-radius tests (unrelated to any recent changes)
 
@@ -780,7 +893,7 @@ python3 -m pytest tests/ -q
 
 ---
 
-## 14. Installation & Setup
+## 16. Installation & Setup
 
 ### Requirements
 
@@ -845,7 +958,7 @@ Settings → Webhooks → Add webhook:
 
 ---
 
-## 15. Environment Variables
+## 17. Environment Variables
 
 ### Required
 
@@ -902,7 +1015,7 @@ Settings → Webhooks → Add webhook:
 
 ---
 
-## 16. Project Structure
+## 18. Project Structure
 
 ```
 auto-healing-devops-platform/
@@ -968,7 +1081,7 @@ auto-healing-devops-platform/
 
 ---
 
-## 17. Authors
+## 19. Authors
 
 | Name | Email | Program |
 |---|---|---|

@@ -129,6 +129,8 @@ class FixGenerator:
         analysis: FailureAnalysis,
         code_context: str,
         cleaned_logs: str,
+        arch_layer: str = "",
+        arch_fix_hint: str = "",
     ) -> CodeFix:
         """Generate a code fix for *analysis*.
 
@@ -196,6 +198,17 @@ class FixGenerator:
         logger.info("task_complexity build_id=%s level=%s mode=%s",
                     analysis.build_id, complexity.value,
                     "complex" if complex_mode else "surgical")
+
+        # Inject architecture layer guidance into the memory context block.
+        # The LLM sees this before the bug context so it can choose a fix
+        # strategy appropriate for the layer (frontend/backend/db/infra/tests).
+        if arch_fix_hint:
+            arch_block = (
+                f"\n=== ARCHITECTURE CONTEXT ===\n"
+                f"Layer: {arch_layer}\n"
+                f"Guidance: {arch_fix_hint}\n"
+            )
+            memory_ctx = arch_block + (memory_ctx or "")
 
         prompt, system = self._build_prompt(
             complex_mode, analysis, compressed_logs, code_context, memory_ctx, bug_count,

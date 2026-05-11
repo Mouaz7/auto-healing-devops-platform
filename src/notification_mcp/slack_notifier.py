@@ -180,6 +180,23 @@ async def send_slack_review_buttons(
                 {"type": "mrkdwn", "text": f"🐛 *Bugs Found*\n*{bug_count}* bug(s)"},
             ],
         },
+        # ── ARCHITECTURE CONTEXT ─────────────────────────────────────────
+        *([{
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"🏛️ *Architecture* — "
+                    f"{ {'FRONTEND':'🎨 Frontend','BACKEND':'⚙️ Backend','DATABASE':'🗄️ Database','INFRA':'🐳 Infra','TESTS':'🧪 Tests','MOBILE':'📱 Mobile','DATA_ML':'🧠 Data/ML','UNKNOWN':'❓ Unknown'}.get(rd.get('arch_layer','UNKNOWN'),'❓ Unknown') }"
+                    f"{' · ' + rd['arch_sub_layer'] if rd.get('arch_sub_layer') else ''}"
+                    f"{' · `' + rd['arch_framework'] + '`' if rd.get('arch_framework') else ''}"
+                    f"{' · `' + rd['arch_language'] + '`' if rd.get('arch_language') else ''}"
+                    f"{' on `' + rd['arch_runtime'] + '`' if rd.get('arch_runtime') else ''}"
+                    f"{' · 🔗 also: ' + ', '.join(rd['arch_cross_layers']) if rd.get('arch_cross_layers') else ''}"
+                    f"\n_{rd.get('arch_risk_note','')[:200]}_"
+                ),
+            },
+        }] if rd.get("arch_layer") and rd.get("arch_layer") != "UNKNOWN" else []),
 
         # ── ROOT CAUSE ──────────────────────────────────────────────────
         {

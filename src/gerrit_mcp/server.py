@@ -80,6 +80,9 @@ class GerritMCPServer(MCPServiceBase):
                 "all_affected_files", "fix_strategy", "bug_list",
                 "attempts", "model_used", "bandit_issues", "regression_risk",
                 "test_hints", "complexity", "original_code", "cleaned_logs",
+                "arch_layer", "arch_confidence", "arch_risk_note",
+                "arch_sub_layer", "arch_framework", "arch_language", "arch_runtime",
+                "arch_cross_layers", "arch_tags", "arch_severity",
             ) if k in data
         } or None
 
