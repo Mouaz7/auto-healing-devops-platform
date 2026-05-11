@@ -84,6 +84,7 @@ class NimClient:
         self.agent_name = agent_name
         self._fallback_mgr = ModelFallbackManager(agent_name)
         self._slots = load_slot_configs(agent_env_prefix, slot_params)
+        self.last_model: str = ""
         # One OpenAI client per slot — reused across calls to avoid reconnection overhead
         self._clients = {
             model: OpenAI(base_url=_NIM_BASE_URL, api_key=slot.api_key)
@@ -133,6 +134,7 @@ class NimClient:
                 used = response.usage.total_tokens if response.usage else tokens_needed
                 token_tracker.record_usage(self.agent_name, used)
                 self._fallback_mgr.reset()
+                self.last_model = model
                 logger.info("nim_complete agent=%s model=%s tokens=%d",
                             self.agent_name, model, used)
                 return content

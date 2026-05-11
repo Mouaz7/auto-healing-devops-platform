@@ -489,6 +489,7 @@ class FixGenerator:
                     test_ok=False,
                     changed_lines={str(k): v for k, v in changed_lines.items()},
                     bugs_found=bugs_found,
+                    model_used=getattr(self._nim, "last_model", "") if self._nim else "",
                 )
 
             except (AllModelsFailed, FixTooLongError, SecretLeakError,

@@ -75,6 +75,11 @@ class GerritMCPServer(MCPServiceBase):
             k: data[k] for k in (
                 "colour", "confidence", "elapsed_s",
                 "error_type", "blast_radius", "root_cause", "explanation",
+                "bugs_found", "bug_count", "verdict_reason", "final_score",
+                "changed_lines", "scan_findings", "parse_error",
+                "all_affected_files", "fix_strategy", "bug_list",
+                "attempts", "model_used", "bandit_issues", "regression_risk",
+                "test_hints", "complexity", "original_code", "cleaned_logs",
             ) if k in data
         } or None
 

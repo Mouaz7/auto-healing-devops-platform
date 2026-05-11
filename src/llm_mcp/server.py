@@ -86,6 +86,7 @@ class LLMMCPServer(MCPServiceBase):
             "test_ok":         fix.test_ok,
             "changed_lines":   fix.changed_lines,
             "bugs_found":      fix.bugs_found,
+            "model_used":      fix.model_used,
         })
 
 

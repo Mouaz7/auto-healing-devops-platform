@@ -502,6 +502,28 @@ class PipelineMixin:
             elif analysis.get("root_cause"):
                 bugs_found_final = [str(analysis["root_cause"])[:200]]
 
+        # Authoritative bug count via line-by-line diff between original and fix.
+        # This is independent of the LLM's count — we count what actually changed.
+        diff_bug_count = 0
+        if original_code and fix.get("fix_patch"):
+            import re as _re_diff
+            _autoheal_strip = _re_diff.compile(r"\s*#\s*AUTO-HEAL:.*$")
+            orig_lines = [ln.rstrip() for ln in original_code.splitlines()]
+            fix_lines  = [
+                _autoheal_strip.sub("", ln).rstrip()
+                for ln in fix.get("fix_patch", "").splitlines()
+            ]
+            # Strip blank lines for fair comparison (formatting != bug)
+            orig_norm = [ln for ln in orig_lines if ln.strip()]
+            fix_norm  = [ln for ln in fix_lines if ln.strip()]
+            # Count distinct lines in original that don't appear in fix
+            fix_set = set(fix_norm)
+            diff_bug_count = sum(1 for ln in orig_norm if ln not in fix_set)
+            logger.info(
+                "diff_bug_count build_id=%s diff=%d llm=%d",
+                build_id, diff_bug_count, len(bugs_found_final),
+            )
+
         report_data = {
             "colour":         colour,
             "confidence":     fix.get("confidence", 0.0),
@@ -516,7 +538,10 @@ class PipelineMixin:
             "verdict_reason": verdict.get("reason", ""),
             "final_score":    verdict.get("final_score", fix.get("confidence", 0.0)),
             "bug_count":      (
-                len(bugs_found_final)
+                # Diff-based count is authoritative — we count the actual changes.
+                # Fall back to LLM/scanner counts only when diff is unavailable.
+                diff_bug_count
+                or len(bugs_found_final)
                 or len(fix.get("changed_lines", {}))
                 or len(scan_findings)
                 or fix.get("bug_count", 0)

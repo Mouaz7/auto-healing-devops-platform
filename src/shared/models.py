@@ -100,6 +100,7 @@ class CodeFix:
     test_ok: bool = False
     changed_lines: dict = field(default_factory=dict)   # {line_number: new_code}
     bugs_found: list = field(default_factory=list)      # ["bug description", ...]
+    model_used: str = ""                                 # AI model name used for this fix
 
 
 @dataclass
