@@ -62,7 +62,7 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 | Regex + LLM fallback error analysis for 11 error types, blast radius | `src/knowledge_graph_mcp/failure_analyser.py` |
 | Fix generation: retry loop 6–14 attempts, surgical patch or full rewrite | `src/llm_mcp/fix_generator.py` |
 | Proactive AST bug scanner: 63 patterns injected into prompt before LLM sees traceback | `src/llm_mcp/bug_scanner.py` |
-| 14 runtime error hints: NoneType, IndexError, KeyError, RecursionError, ZeroDivision, etc. | `src/llm_mcp/fix_validators.py` |
+| 11 runtime error hints in retry prompts: TypeError, IndexError, KeyError, RecursionError, AttributeError, NameError, ValueError, ZeroDivisionError, SyntaxError, IndentationError, AssertionError | `src/llm_mcp/fix_prompts.py` |
 | Stuck-loop pivot: identical error type twice → strategy change in prompt | `src/llm_mcp/fix_prompts.py:45` |
 | 4-model fallback chain per agent, complexity-based model routing | `src/shared/nim_client.py`, `src/shared/task_complexity.py` |
 
@@ -80,7 +80,7 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 | **Audit trail** | Append-only JSONL log — every pipeline event with UTC timestamp. | `src/shared/audit_log.py` |
 | **Regression loop prevention** | Same files fail again after recent fix → workflow → BLOCKED + Slack RED. | `src/orchestrator_mcp/pipeline_mixin.py` |
 | **Retry limits** | Max 6–14 attempts by bug complexity. `FixStillBrokenError` on exhaustion. | `src/llm_mcp/fix_generator.py:254` |
-| **CI loop guard** | `!startsWith(commit.message, 'auto-heal')` — healer commits never re-trigger the healer. | `.github/workflows/auto-heal.yml` |
+| **CI loop guard** | Auto-heal commits use branch prefix `auto-heal/<build_id>` and titles `[auto-heal][COLOUR]` so external CI can exclude them with branch-name or commit-message filters. | `src/gerrit_mcp/patch_submitter.py` |
 | **Protected paths** | AI cannot modify `.github/`, `Dockerfile`, `pyproject.toml`, or infra files. | `src/gerrit_mcp/gerrit_helpers.py:is_protected_path` |
 | **Deduplication** | MD5 fingerprint of error+files prevents re-processing the same failure for 24 h. | `src/orchestrator_mcp/deduplication.py` |
 
@@ -90,7 +90,7 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 |---|---|---|
 | AI introduces security vulnerabilities | Bandit scan → retry or block | `src/shared/quality_gates.py` |
 | AI produces low-quality code | Pylint real score → confidence penalty | `src/shared/quality_gates.py` |
-| AI hallucinates wrong fixes | AST parse + sandboxed subprocess run + 14 runtime hints before accepting | `src/llm_mcp/fix_validators.py` |
+| AI hallucinates wrong fixes | AST parse + sandboxed subprocess run + 11 runtime hints in retry prompt before accepting | `src/llm_mcp/fix_validators.py`, `src/llm_mcp/fix_prompts.py` |
 | AI targets symptom not root cause | 63-pattern static scanner pre-annotates code with bug locations before LLM call | `src/llm_mcp/bug_scanner.py` |
 | AI cannot be trusted to merge | **Auto-merge disabled** — human clicks Merge on GitHub | `src/orchestrator_mcp/github_mixin.py` |
 | No accountability or traceability | Audit trail + PR body with confidence, root cause, elapsed time | `src/shared/audit_log.py` |
@@ -103,40 +103,68 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 ## 2. Architecture — The 6 Agents
 
 ```
-┌────────────────────────────────────────────────────────┐
-│   GitHub Actions / Jenkins  ──►  ngrok tunnel          │
-│        POST /tools/handle_build_failure                │
-└────────────────────────┬───────────────────────────────┘
-                         │
-                ┌────────▼────────┐
-                │   Orchestrator  │  :8085
-                │  State machine  │  Pipeline control
-                │  Dedup · Rate   │  Cost tracking
-                │  🆕 Arch Class. │  🆕 Diff Bug Counter
-                └────────┬────────┘
-        ┌────────────────┼────────────────────┐
-        │                │                    │
-┌───────▼──────┐  ┌──────▼─────┐    ┌────────▼─────┐
-│  Agent 3     │  │  Agent 4   │    │   Agent 5    │
-│  Log Cleaner │  │  Error     │    │  Code        │
-│  :8081       │  │  Analyst   │    │  Repairer    │
-│  5-stage     │  │  :8084     │    │  :8086       │
-│  regex +     │  │  Regex +   │    │  Fix memory  │
-│  LLM fallbk  │  │  blast rad │    │  + Bandit    │
-└──────────────┘  └────────────┘    │  + Pylint    │
-                                    │  + AUTO-HEAL │
-                                    └──────┬───────┘
-                                           │
-                                  ┌────────▼────────┐
-                                  │   Agent 6       │  :8087
-                                  │  Review & Notify│  Traffic light
-                                  │  Slack · Teams  │  Slash commands
-                                  └─────────────────┘
-
-Supporting services:
-  Agent 1  Jenkins MCP  :8082 — Build-failure polling
-  Agent 2  Scheduler           — Task classification (Scenario A/B), daily digest
-           Gerrit MCP  :8083  — GitHub PR creation + AUTO-HEAL patch submission
+╔══════════════════════ TRIGGER AGENTS (run independently) ═══════════════════╗
+║                                                                              ║
+║  ┌──────────────────────┐         ┌──────────────────────────────┐         ║
+║  │  Agent 1 — Jenkins   │         │   Agent 2 — Scheduler        │         ║
+║  │  jenkins-mcp  :8082  │         │   scheduler (no port)        │         ║
+║  │                      │         │                              │         ║
+║  │  • Polls Jenkins     │         │  • Polls GitHub Issues/Jira  │         ║
+║  │  • Fetches raw logs  │         │  • Classifies: A / B / YELLOW│         ║
+║  │  • On failure → POST │         │  • Daily 08:00 UTC digest    │         ║
+║  └──────────┬───────────┘         └──────────┬───────────────────┘         ║
+║             │                                │                              ║
+╚═════════════╪════════════════════════════════╪══════════════════════════════╝
+              │                                │
+              │  POST /tools/handle_build_failure
+              ▼                                ▼
+   ┌─────────────────────────────────────────────────────────┐
+   │             ORCHESTRATOR — orchestrator-mcp :8085        │
+   │     State machine · Dedup · Rate limit · Cost tracking  │
+   └────────────────────────┬────────────────────────────────┘
+                            │  (sequential pipeline)
+                            │
+                            ▼
+   ┌─────────────────────────────────────────────────────────┐
+   │ Agent 3 — Log Cleaner       (log-cleaner-mcp   :8081)   │
+   │ 5-stage regex pipeline + LLM fallback  · ~95% reduction │
+   └────────────────────────┬────────────────────────────────┘
+                            ▼
+   ┌─────────────────────────────────────────────────────────┐
+   │ Agent 4 — Error Analyst     (knowledge-graph-mcp :8084) │
+   │ Regex + LLM · 11 error types · blast radius             │
+   └────────────────────────┬────────────────────────────────┘
+                            ▼
+   ┌─────────────────────────────────────────────────────────┐
+   │ 🆕 Architecture Classifier  (in-process in orchestrator)│
+   │ 7 layers · 152 frameworks · 82 languages · 55 sub-layers│
+   └────────────────────────┬────────────────────────────────┘
+                            ▼
+   ┌─────────────────────────────────────────────────────────┐
+   │       Gerrit MCP — fetch source file content :8083      │
+   └────────────────────────┬────────────────────────────────┘
+                            ▼
+   ┌─────────────────────────────────────────────────────────┐
+   │ Agent 5 — Code Repairer     (llm-mcp           :8086)   │
+   │ 63-pattern bug scanner → LLM → AUTO-HEAL annotations    │
+   │ Bandit + Pylint + secret scanner · 6–14 retry attempts  │
+   └────────────────────────┬────────────────────────────────┘
+                            ▼
+   ┌─────────────────────────────────────────────────────────┐
+   │ 🆕 Diff Bug Counter         (in-process in orchestrator)│
+   │ Token-level diff · authoritative bug count              │
+   └────────────────────────┬────────────────────────────────┘
+                            ▼
+   ┌─────────────────────────────────────────────────────────┐
+   │ Agent 6 — Review & Notify   (notification-mcp  :8087)   │
+   │ Traffic light (file + bug + confidence)                 │
+   │ Slack (Block Kit) + Teams + 9 slash commands            │
+   └────────────────────────┬────────────────────────────────┘
+                            ▼
+   ┌─────────────────────────────────────────────────────────┐
+   │  Gerrit MCP — create GitHub PR with AUTO-HEAL patch     │
+   │  (only on 🟢 GREEN or 🟡 YELLOW — HITL still required)  │
+   └─────────────────────────────────────────────────────────┘
 ```
 
 | # | Agent | Service | Port | Role |
@@ -245,7 +273,7 @@ POST /tools/handle_build_failure
   │
   ├─ Rate limit (10 req/60s)  ──────────────────────────► 429
   ├─ Payload size (> 500 KB)  ──────────────────────────► 413
-  ├─ Duplicate build_id       ──────────────────────────► 409
+  ├─ Duplicate build_id       ──────────────────────────► 200 ALREADY_TRIGGERED
   │
   ▼  [Agent 3]  Clean logs
      • Remove ANSI codes, timestamps, duplicate lines, noise
@@ -596,12 +624,14 @@ Scoring factors: error type weight + blast radius + number of files + log length
 
 | Agent | Max tokens/req | Max tokens/hour |
 |---|---|---|
-| Log Analyst | 2 000 | 20 000 |
-| Error Analyst | 3 000 | 30 000 |
-| Code Repairer | 4 000 | 50 000 |
-| Review & Notify | 2 000 | 20 000 |
+| Pipeline Monitor (Agent 1) | 500 | 5 000 |
+| Task Inspector (Agent 2) | 1 000 | 10 000 |
+| Log Analyst (Agent 3) | 2 000 | 20 000 |
+| Error Analyst (Agent 4) | 3 000 | 30 000 |
+| Code Repairer (Agent 5) | 4 000 | 50 000 |
+| Review & Notify (Agent 6) | 2 000 | 20 000 |
 
-Global budget: **135 000 tokens/hour**. Warning at 80%.
+Global budget: **135 000 tokens/hour** (sum of all six). Warning at 80%.
 
 ### Cost Tracking
 
@@ -1015,7 +1045,7 @@ Every morning at 08:00 UTC: builds processed, success rates, top error types, tr
 
 | File | What it verifies |
 |---|---|
-| `test_full_pipeline.py` | GREEN/YELLOW path, 400/409/413/429, dedup, fix_memory |
+| `test_full_pipeline.py` | GREEN/YELLOW path, 400/413/429, dedup, fix_memory |
 | `test_analysis_pipeline.py` | Log cleaner → error analyst → traffic light chain |
 | `test_global_fallback.py` | Agent crash → RED notification, FAILED state |
 | `test_quality_gates_integration.py` | Bandit + Pylint in pipeline context |
