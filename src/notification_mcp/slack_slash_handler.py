@@ -34,6 +34,7 @@ import httpx
 from aiohttp import web
 
 from src.notification_mcp.slash_responses import (
+    clean_build_id,
     explain_response,
     help_response,
     history_response,
@@ -94,14 +95,13 @@ def _get_engine():
 # ---------------------------------------------------------------------------
 
 def _cmd_status(arg: str) -> dict:
-    if not arg:
-        return usage("Usage: `/autoheal status <build_id>`")
+    build_id = clean_build_id(arg)
     engine = _get_engine()
     try:
-        state = engine.get(arg) if engine else None
+        state = engine.get(build_id) if engine and build_id else None
     except Exception:  # pylint: disable=broad-exception-caught
         state = None
-    return status_response(arg, state)
+    return status_response(build_id, state)
 
 
 def _cmd_list() -> dict:
@@ -115,42 +115,41 @@ def _cmd_stats() -> dict:
 
 
 async def _cmd_retry(arg: str) -> dict:
-    if not arg:
-        return usage("Usage: `/autoheal retry <build_id>`")
+    build_id = clean_build_id(arg)
+    if not build_id:
+        return usage("💡 Usage: `/autoheal retry <build_id>` — e.g. `/autoheal retry 25643594071`")
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             resp = await client.post(
                 f"{_ORCHESTRATOR_URL}/tools/retry_build",
-                json={"build_id": arg},
+                json={"build_id": build_id},
             )
         if resp.status_code in (200, 202):
-            return usage(f"♻️ Build `{arg}` has been re-submitted to the pipeline.")
-        return usage(f"⚠️ Could not retry build `{arg}` (status {resp.status_code}).")
+            return usage(f"♻️ Build `{build_id}` re-submitted to the pipeline. Check `/autoheal status {build_id}` shortly.")
+        return usage(f"⚠️ Could not retry build `{build_id}` (HTTP {resp.status_code}).")
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        return usage(f"⚠️ Retry failed: {exc}")
+        return usage(f"❌ Retry failed: {exc}")
 
 
 def _cmd_explain(arg: str) -> dict:
-    if not arg:
-        return usage("Usage: `/autoheal explain <build_id>`")
+    build_id = clean_build_id(arg)
     from src.shared.fix_memory import fix_memory
     matching = [
         r for r in fix_memory._load_records()  # pylint: disable=protected-access
-        if r.get("build_id") == arg and not r.get("_update")
-    ]
-    return explain_response(arg, matching)
+        if r.get("build_id") == build_id and not r.get("_update")
+    ] if build_id else []
+    return explain_response(build_id, matching)
 
 
 def _cmd_history(arg: str) -> dict:
-    if not arg:
-        return usage("Usage: `/autoheal history <file_path>`")
+    file_path = arg.strip("`'\" ")
     from src.shared.fix_memory import fix_memory
     all_recs = fix_memory._load_records()  # pylint: disable=protected-access
     matching = [
         r for r in reversed(all_recs)
-        if not r.get("_update") and arg in (r.get("files_key") or "")
-    ]
-    return history_response(arg, matching)
+        if not r.get("_update") and file_path in (r.get("files_key") or "")
+    ] if file_path else []
+    return history_response(file_path, matching)
 
 
 def _cmd_top() -> dict:
@@ -254,8 +253,9 @@ async def handle_slash_command(request: web.Request) -> web.Response:
     if sub_cmd == "top":        return web.json_response(_cmd_top())
     if sub_cmd == "thresholds": return web.json_response(_cmd_thresholds())
     if sub_cmd == "rollback":
-        if not arg:
-            return web.json_response(usage("Usage: `/autoheal rollback <build_id>`"))
-        return web.json_response(await _do_rollback(arg))
+        build_id = clean_build_id(arg)
+        if not build_id:
+            return web.json_response(usage("💡 Usage: `/autoheal rollback <build_id>` — closes the auto-heal PR"))
+        return web.json_response(await _do_rollback(build_id))
 
     return web.json_response(help_response())

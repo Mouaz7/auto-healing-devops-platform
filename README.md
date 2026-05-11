@@ -641,21 +641,86 @@ Manual intervention required.
 
 This also fires for regression loops ("Regression loop detected — same file fixed recently") and 422-rejected fixes ("Fix generation rejected — too complex").
 
-### `/autoheal` Slash Commands (9 commands)
+### `/autoheal` Slash Commands
 
-| Command | Description |
-|---|---|
-| `/autoheal status <build_id>` | Workflow state, colour, last update |
-| `/autoheal list` | Last 10 workflows with colour emoji |
-| `/autoheal stats` | Fix success rates by error type |
-| `/autoheal retry <build_id>` | Re-submit a failed build |
-| `/autoheal explain <build_id>` | Plain-English explanation of the fix |
-| `/autoheal rollback <build_id>` | Close the associated PR |
-| `/autoheal history <file>` | All past fixes for a specific file |
-| `/autoheal top` | Most problematic files (by failure count) |
-| `/autoheal thresholds` | Current adaptive thresholds per error type |
+All commands return rich Block Kit messages with emoji, two-column layouts, and action buttons.
+Build IDs work with or without prefixes — `25643594071`, `build 25643594071`, `#25643594071`, and `id: 25643594071` all resolve to the same build.
 
-All slash commands verified with HMAC-SHA256 signature + 5-minute replay-attack window.
+#### 🔍 Inspect commands
+
+| Command | Example | What it shows |
+|---|---|---|
+| `/autoheal help` | `/autoheal help` | 🤖 Grouped command menu with all sub-commands and tips |
+| `/autoheal status <build_id>` | `/autoheal status 25643594071` | 🚦 Build status (PENDING / ANALYSING / GENERATING_FIX / AWAITING_REVIEW / COMPLETED / BLOCKED), last update, error message |
+| `/autoheal list` | `/autoheal list` | 📋 Last 10 active workflows with status emoji per row |
+| `/autoheal explain <build_id>` | `/autoheal explain 25643594071` | 📝 Plain-English fix explanation: root cause, files changed, what AI did, human approve/reject status, button to open PR |
+
+#### ♻️ Action commands
+
+| Command | Example | What it does |
+|---|---|---|
+| `/autoheal retry <build_id>` | `/autoheal retry 25643594071` | ♻️ Re-submits the build to the orchestrator pipeline |
+| `/autoheal rollback <build_id>` | `/autoheal rollback 25643594071` | 🔙 Closes the auto-heal PR on GitHub (undoes the fix) |
+
+#### 📊 Insight commands
+
+| Command | Example | What it shows |
+|---|---|---|
+| `/autoheal stats` | `/autoheal stats` | 📈 Fix success rates per error type: total count + 🟢 / 🟡 / 🔴 percentages |
+| `/autoheal history <file>` | `/autoheal history quicksort.py` | 📜 Last 8 fixes for a file with date, error type, confidence, and approval status |
+| `/autoheal top` | `/autoheal top` | 🏆 Most failure-prone files (medals 🥇🥈🥉 + visual failure bars) |
+| `/autoheal thresholds` | `/autoheal thresholds` | 🎚️ Per-error-type GREEN/YELLOW thresholds. ⭐ marks adaptive (self-adjusted) values |
+
+#### Example responses
+
+**`/autoheal status 25643594071`:**
+```
+🟡  Build Status
+
+🆔 Build           📊 Status
+25643594071        AWAITING_REVIEW
+
+🕒 Updated         🚦 State
+01:38 UTC          🟡 AWAITING_REVIEW
+```
+
+**`/autoheal stats`:**
+```
+📈  Fix Success Rates by Error Type
+
+🐛 SYNTAX_ERROR — 12 fix(es)
+     🟢 83%   🟡 8%   🔴 8%
+
+🐛 TEST_FAILURE — 5 fix(es)
+     🟢 60%   🟡 20%   🔴 20%
+```
+
+**`/autoheal top`:**
+```
+🏆  Most Troubled Files
+
+🥇  quicksort.py — 5 failure(s)  🔴🔴🔴🔴🔴
+🥈  utils.py    — 3 failure(s)  🔴🔴🔴
+🥉  parser.py   — 2 failure(s)  🔴🔴
+📁  main.py     — 1 failure(s)  🔴
+
+🎯 These files might benefit from refactoring or extra test coverage.
+```
+
+**Error responses are also helpful:**
+```
+❌  Build `99999` not found
+
+💡 Tip: Use `/autoheal list` to see active builds, or check the
+        Jenkins build number is correct.
+🤖 Run `/autoheal help` to see all commands
+```
+
+#### Security
+
+- All slash-command requests verified with HMAC-SHA256 signature
+- 5-minute replay-attack window
+- Requests signed with `SLACK_SIGNING_SECRET` env var
 
 ### Daily Digest
 
