@@ -92,7 +92,7 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 | AI cannot be trusted to merge | **Auto-merge disabled** — human clicks Merge on GitHub | `src/orchestrator_mcp/github_mixin.py` |
 | No accountability or traceability | Audit trail + PR body with confidence, root cause, elapsed time | `src/shared/audit_log.py` |
 | System loops infinitely | Regression block + CI guard prevent infinite repair cycles | `src/orchestrator_mcp/pipeline_mixin.py` |
-| Confidence score is opaque | Exact score + threshold shown in every notification: "fix proposed for review (score 97%, threshold 85%)". `auto_merge_allowed` always `False`. | `src/notification_mcp/traffic_light_evaluator.py` |
+| Confidence score is opaque | Decision Reason shown in every notification: "1 file, 19 bugs, confidence 95%". `auto_merge_allowed` always `False`. | `src/notification_mcp/traffic_light_evaluator.py` |
 | Thresholds don't fit the domain | Adaptive thresholds self-calibrate from human approve/reject decisions | `src/shared/adaptive_thresholds.py` |
 
 ---
@@ -284,29 +284,48 @@ Three complementary mechanisms:
 
 ## 5. Traffic Light Safety System
 
-### Score Formula
+### Decision Logic (file count + bugs/file + AI confidence)
+
+The traffic light is computed from three concrete inputs — not an opaque weighted score.
 
 ```
-final_score = (llm_confidence × 0.6) + (blast_radius_score × 0.4)
+Step 1 — RED overrides (any one triggers RED immediately):
+  • > 30 bugs in any single file   → file too broken for reliable AI fix
+  • > 5  files affected            → change scope too wide
+  • AI confidence < 0.60           → AI itself is not sure
 
-Blast radius scores:
-  LOW    → 1.0
-  MEDIUM → 0.6
-  HIGH   → 0.2  ── HIGH always forces 🔴 RED regardless of confidence
+Step 2 — YELLOW:
+  • 4–5 files affected, ≤ 30 bugs/file, confidence ≥ 0.60
+
+Step 3 — GREEN:
+  • 1–3 files, ≤ 30 bugs/file, confidence ≥ 0.60
 ```
 
-### Thresholds (adaptive per error type)
+### Decision Table
 
-| Colour | Score | Reason text sent to Slack | Action |
+| Colour | Condition | Reason text shown in Slack & PR | Action |
 |---|---|---|---|
-| 🟢 **GREEN** | ≥ 0.85 | "High confidence — fix proposed for review (score X%, threshold 85%)" | PR opened · Slack Approve/Reject buttons (fast-track) · regression watch started |
-| 🟡 **YELLOW** | 0.60–0.84 | "Medium confidence — careful human review required (score X%, threshold 60%)" | PR opened · Slack Approve/Reject buttons · 24 h review window |
-| 🔴 **RED** | < 0.60 | "Low confidence — fix blocked (score X% below 60% threshold)" | No PR · Slack RED alert · workflow BLOCKED · manual intervention required |
-| 🔴 **RED** (safety) | any | "Safety override: HIGH blast radius forces RED (score X%)" | No PR · Slack RED alert · workflow BLOCKED |
+| 🟢 **GREEN** | 1–3 files, ≤30 bugs/file, conf ≥60% | "High confidence fix — N file(s), M bug(s), confidence X%" | PR opened · Slack Approve/Reject (fast-track) · regression watch started |
+| 🟡 **YELLOW** | 4–5 files, ≤30 bugs/file, conf ≥60% | "N files affected — careful review required (confidence X%)" | PR opened · Slack Approve/Reject (careful review) · 24 h window |
+| 🔴 **RED** | >5 files | "Too many files affected (N > 5) — change scope too wide" | No PR · Slack RED alert · workflow BLOCKED |
+| 🔴 **RED** | >30 bugs/file | "Too many bugs per file (N > 30) — file too broken for reliable AI fix" | No PR · Slack RED alert · workflow BLOCKED |
+| 🔴 **RED** | conf <60% | "AI confidence too low (X% < 60%) — fix blocked" | No PR · Slack RED alert · workflow BLOCKED |
 
 `auto_merge_allowed` is always `False` — the traffic light colour signals review urgency, not a merge decision.
 
-Thresholds are **not fixed** — they self-calibrate per error type. After 5+ human decisions, `new_GREEN = mean(approved_confidences) − 0.03`. Stored in append-only JSONL, cached in memory.
+The 60% confidence floor is **adaptive per error type** — after 5+ human decisions, the threshold self-calibrates: `new_floor = mean(approved_confidences) − 0.03`. Stored in append-only JSONL, cached in memory.
+
+### Bug Counting (token-level diff)
+
+Bug count is computed by an **authoritative token-level diff** between the original and fixed file — not the LLM's self-reported count.
+
+| Granularity | Example: `arr[idx], arr[l] = arr[l], arr[idx]` → `arr[idx], arr[k] = arr[k], arr[idx]` |
+|---|---|
+| Per-line (too coarse) | 1 bug |
+| **Per-token (used)** | **2 bugs** (each `l` → `k` is independent) |
+| Per-character (too granular) | counts whitespace/formatting changes |
+
+The same diff feeds the traffic-light evaluator, the PR report, and Slack — they always agree on the count.
 
 ---
 
@@ -395,7 +414,15 @@ After 5+ human decisions for an error type:
 
 ### Regression Watch (`src/shared/heal_verifier.py`)
 
-After every fix, affected files are watched for **60 minutes**. Re-failure on the same files → `regression_detected` audit event + pipeline blocked.
+After every fix, affected files are watched for **60 minutes**. Behaviour on re-failure:
+
+| Scenario | Action |
+|---|---|
+| Same file, **same** error type, first re-failure | ✅ Allow one retry — AI may need another pass on the same problem |
+| Same file, same error type, second re-failure | 🚫 BLOCKED — definitely needs human review |
+| Same file, **different** error type | 🚫 BLOCKED — likely new bug introduced by fix, not a retry |
+
+The retry counter is stored per fix record. After the 60-minute window expires, the file is unguarded again.
 
 ---
 
@@ -497,18 +524,29 @@ Every auto-heal fix opens a GitHub Pull Request with a detailed structured repor
 
 | Section | Content |
 |---|---|
-| 📊 **Summary** | Build ID, confidence score + visual bar, traffic light status, error type, blast radius, bugs found, AI attempts, model used, time to fix |
+| 📊 **Summary** | Build ID, traffic light, confidence + 🟩🟨🟥 emoji bar, **Decision Reason** (e.g. "1 file, 19 bugs, confidence 95%"), error type, blast radius, **bugs found** (token-level diff count), AI attempts, **model used** (e.g. `qwen/qwen2.5-coder-32b-instruct`), time to fix |
 | 🔍 **Error Analysis** | Root cause, error type detail, blast radius explanation |
-| 🐛 **Bug Report** | Overview table: `# · Severity · Line · Pattern · Problem` for every bug found |
-| 🔄 **Bug Details — What Changed** | Per-bug table: `🔴 Bug (line N) → ✅ Replacement` showing the exact buggy line and its fix |
+| 🐛 **Bug Report** | Per-bug list with exact line numbers and AUTO-HEAL descriptions |
 | 🛠️ **Fix Strategy** | AI explanation of fix approach + detailed description |
 | 📁 **Affected Files** | List of all files modified |
-| 🔄 **Full File Before vs After** | Collapsible: original (buggy) file + fixed file side by side |
+| 🔄 **Full File Before vs After** | Collapsible: **annotated** original with `# ← BUG: <description>` markers + fixed file with `# AUTO-HEAL:` comments |
 | 🔒 **Security Analysis** | Bandit scan results on the generated fix |
-| ⚠️ **Regression Risk** | Assessment of what could break |
-| 🧪 **Test Recommendations** | Specific tests that should be run |
+| ⚠️ **Regression Risk** | LLM-produced assessment of side-effects (e.g. "return type changed from float to int — callers may break") |
+| 🧪 **Test Recommendations** | LLM-produced concrete test suggestions for the specific fix |
 | 🤖 **Agent Pipeline** | Visual diagram of the 4-step pipeline with attempt count |
 | 📝 **Full Patch** | Collapsible raw patch (up to 8000 chars) |
+
+### Annotated BEFORE File
+
+The original buggy file is rendered with inline `# ← BUG:` markers — every bug is visible at a glance:
+
+```python
+def partition(arr, l, h):
+    piv = arr[h + 1]    # ← BUG: correct pivot
+    idx = l + 1         # ← BUG: corrected start index
+    for k in range(l, l):   # ← BUG: fixed upper bound
+        if arr[k] > piv:    # ← BUG: corrected to '<'
+```
 
 ### Bug → Fix Table Format
 
@@ -539,45 +577,55 @@ Both GREEN and YELLOW fixes send a rich Slack message with full analysis + Appro
 
 | Section | Content |
 |---|---|
-| Header | Build ID, confidence score with visual bar `████████░░`, time to fix |
-| 🔍 Error Analysis | Error type, blast radius, root cause |
-| 🐛 Bugs Found | Each bug with exact **line number**, pattern name, severity, fix hint |
-| 🛠️ What was fixed | AI explanation of what changed and why |
-| 🔴 Code BEFORE | First 10 lines of the original buggy file |
-| ✅ Code AFTER | First 10 lines of the fixed file |
-| Buttons | **Approve & Merge** / **Reject** |
+| Header | Colour-coded title (🚀 GREEN / ⚠️ YELLOW / 🚨 RED) |
+| Status banner | Status label, **emoji confidence bar** (🟩🟨🟥), time to fix, PR link |
+| Build info (2-column) | Build ID, error type, blast radius, **bug count** |
+| 🔍 Root cause | One-line root cause |
+| 🐛 Bugs preview | Top 3 bugs with line numbers + AUTO-HEAL descriptions |
+| 🔍 "View all N bugs on GitHub" | Button (when bugs > 3) — opens PR for full list |
+| 🛠️ What the AI fixed | Phase-by-phase explanation |
+| 🔴/✅ Before/After | Code snippets |
+| Action buttons | **✅ Approve & Merge** / **❌ Reject** |
+| Footer | Bot name + build ID + HITL reminder |
 
 **Example Slack message:**
 ```
-✅ Auto-Fix Ready — Human Review Required
+🚀  Auto-Heal Fix Ready — Fast-Track Review
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Build: `25528679737`
-Confidence: 99% `█████████░`
-Time to fix: 1m 8s
-PR: View on GitHub
+Status   ›  🟢 HIGH CONFIDENCE
+Confidence ›  🟩🟩🟩🟩🟩🟩🟩🟩🟩⬜  95%
+⏱️  Fixed in 24s  |  🔗  View PR on GitHub
 
-🔍 Error Analysis
-• Error Type: SYNTAX_ERROR
-• Blast Radius: LOW
-• Root Cause: SyntaxError: expected ':'
+🆔 Build ID          📁 Error Type
+`25615749991`        `SYNTAX_ERROR`
 
-🐛 Bugs Found — 4 bug(s) with exact line numbers
-1. 🔴 Line 3 — `off_by_one_range` (HIGH)
-   _range(len(x)+1) skips last element_ → Fix: use range(len(x))
-2. 🟡 Line 7 — `wrong_arithmetic_op` (MEDIUM)
-   _subtraction in average function_ → Fix: use addition
+💥 Blast Radius      🐛 Bugs Found
+`LOW`                19 bug(s)
 
-🛠️ What was fixed
-Phase 1: ... Phase 2: ... Phase 3: ...
+🔍 Root Cause
+> SyntaxError: expected ':'
 
-🔴 Code BEFORE (buggy — first 10 lines)
-`def partition(arr, l, h): ...`
+🐛 Bugs — 19 found & fixed
+1. 🔴 Line 2: was 'arr[h + 1]' (out of bounds) -> correct pivot
+2. 🔴 Line 3: was 'l + 1' (off-by-one) -> corrected start index
+3. 🔴 Line 5: was 'range(l, l)' (empty range) -> fixed upper bound
+   ...and 16 more
 
-✅ Code AFTER (fixed — first 10 lines)
-`def partition(arr, l, h): ...`
+[ 🔍 Visa alla 19 buggar på GitHub ]
 
-[✅ Approve & Merge]    [❌ Reject]
+🛠️ What the AI fixed
+_Phase 1: ... Phase 2: ... Phase 3: ..._
+
+🔴 Before (buggy)       ✅ After (fixed)
+[code]                  [code]
+
+[ ✅ Approve & Merge ]  [ ❌ Reject ]
+
+🤖 Auto-Heal Bot  •  Build `25615749991`  •  All merges require human approval
 ```
+
+The **confidence bar colour** matches the traffic light: 🟩 GREEN, 🟨 YELLOW, 🟥 RED — instantly recognisable.
 
 Human clicks feed back to `fix_memory` and `adaptive_thresholds`.
 

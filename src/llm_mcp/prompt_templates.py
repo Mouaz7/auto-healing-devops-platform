@@ -92,7 +92,9 @@ OUTPUT FORMAT (JSON ONLY — no prose outside the JSON)
   "explanation": "Pedagogical: phases 1-3 condensed. Emojis allowed.",
   "files_to_modify": ["path/to/file.py"],
   "estimated_blast_radius": "LOW|MEDIUM|HIGH",
-  "bugs_found": ["bug 1 description", "bug 2 description", ...]
+  "bugs_found": ["bug 1 description", "bug 2 description", ...],
+  "regression_risk": "Brief warning about potential side-effects (e.g. 'changes return type from float to int — callers may break')",
+  "test_hints": ["Test edge case X", "Verify behavior with empty input", "Run existing test suite"]
 }
 
 ==============================================================================
@@ -104,7 +106,9 @@ EXAMPLE A — single-line surgical fix (binary search self-assignment)
   "files_to_modify": ["tests/test_kram.py"],
   "confidence": 0.95,
   "estimated_blast_radius": "LOW",
-  "bugs_found": ["line 14: self-assignment 'right = right' causes infinite loop — fixed to 'right = mid - 1'"]
+  "bugs_found": ["line 14: self-assignment 'right = right' causes infinite loop — fixed to 'right = mid - 1'"],
+  "regression_risk": "Low — only loop termination logic changed, function signature and return type unchanged.",
+  "test_hints": ["Test with target at first/last position", "Test with target not in array (should return -1)", "Test with empty array"]
 }
 
 ==============================================================================
@@ -125,7 +129,9 @@ EXAMPLE B — multi-bug fix that needs full rewrite
     "division by zero in metrics",
     "target=fn(x) eager call instead of target=fn",
     "default mutable argument []"
-  ]
+  ],
+  "regression_risk": "Medium — thread spawn signature changed (target=fn vs target=fn(x)). Any caller that relied on lazy/eager evaluation may behave differently.",
+  "test_hints": ["Run with N=1 thread", "Run with N=100 threads (concurrency stress)", "Verify metrics divide-by-zero is handled when no jobs processed", "Test default args don't accumulate state across calls"]
 }"""
 
 COMPLEX_SYSTEM_PROMPT = """\

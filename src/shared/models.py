@@ -101,6 +101,8 @@ class CodeFix:
     changed_lines: dict = field(default_factory=dict)   # {line_number: new_code}
     bugs_found: list = field(default_factory=list)      # ["bug description", ...]
     model_used: str = ""                                 # AI model name used for this fix
+    regression_risk: str = ""                            # human-readable side-effect warning
+    test_hints: list = field(default_factory=list)       # ["test suggestion", ...]
 
 
 @dataclass

@@ -230,6 +230,12 @@ class PipelineMixin:
             ))
             return self._blocked_result(build_id, "fix_rejected", "Fix generation rejected")
 
+        # Compute diff-based bugs_found BEFORE notification so traffic light
+        # evaluator and PR report agree on the same authoritative count.
+        diff_bugs = self._compute_diff_bugs(code_context, fix.get("fix_patch", ""))
+        if diff_bugs:
+            fix["bugs_found"] = diff_bugs
+
         elapsed_s = round(time.monotonic() - started_at)
         verdict = await self._step_notify(
             client, build_id, fix, analysis, headers, elapsed_s=elapsed_s,
@@ -308,6 +314,78 @@ class PipelineMixin:
                     build_id, analysis["affected_files"],
                 )
         return analysis
+
+    @staticmethod
+    def _compute_diff_bugs(original_code: str, fix_patch: str) -> list[str]:
+        """Compute the authoritative bug list using TOKEN-LEVEL diff.
+
+        For each changed line, counts each distinct token-group change as one
+        bug. Example: `arr[idx], arr[l] = arr[l], arr[idx]` → `arr[idx], arr[k] = arr[k], arr[idx]`
+        counts as 2 bugs (both `l` → `k` are independent fixes).
+        """
+        if not original_code or not fix_patch:
+            return []
+        import re as _re_d
+        import difflib as _difflib
+        _autoheal_strip = _re_d.compile(r"\s*#\s*AUTO-HEAL:\s*(.*)$")
+
+        def _norm(ln: str) -> str:
+            return _re_d.sub(r"\s+", " ", ln.strip())
+
+        def _tokenize(ln: str) -> list[str]:
+            return _re_d.findall(r"\w+|[^\w\s]", ln)
+
+        orig_raw = original_code.splitlines()
+        fix_raw  = fix_patch.splitlines()
+
+        # Pre-compute normalized fix lines + AUTO-HEAL descriptions
+        fix_clean = [_autoheal_strip.sub("", ln) for ln in fix_raw]
+        fix_norm  = [_norm(ln) for ln in fix_clean if ln.strip()]
+        fix_norm_set = set(fix_norm)
+        autoheal_map: dict[str, str] = {}
+        for ln in fix_raw:
+            m = _autoheal_strip.search(ln)
+            if m:
+                clean = _norm(_autoheal_strip.sub("", ln))
+                autoheal_map[clean] = m.group(1).strip()
+
+        bugs: list[str] = []
+        for orig_lineno, orig_line in enumerate(orig_raw, 1):
+            if not orig_line.strip():
+                continue
+            orig_n = _norm(orig_line)
+            if orig_n in fix_norm_set:
+                continue   # line survived → no bug
+
+            # Find best matching fixed line for token-level comparison
+            matches = _difflib.get_close_matches(orig_n, fix_norm, n=1, cutoff=0.3)
+            best_fix = matches[0] if matches else ""
+
+            # Token-level diff: count each distinct change as one bug
+            orig_tokens = _tokenize(orig_line.strip())
+            fix_tokens  = _tokenize(best_fix)
+            sm = _difflib.SequenceMatcher(None, orig_tokens, fix_tokens)
+            token_bugs = sum(1 for tag, *_ in sm.get_opcodes() if tag != "equal")
+            if token_bugs == 0:
+                token_bugs = 1   # line differs but tokens equal (whitespace-only)
+
+            # Find AUTO-HEAL description for context
+            stripped = orig_line.strip()
+            desc = ""
+            for ah_desc in autoheal_map.values():
+                if stripped[:30] in ah_desc:
+                    desc = ah_desc
+                    break
+            if not desc:
+                desc = f"changed: `{stripped[:80]}`"
+
+            # One entry per token-bug, sharing the same description for context
+            if token_bugs == 1:
+                bugs.append(f"Line {orig_lineno}: {desc[:160]}")
+            else:
+                for n in range(1, token_bugs + 1):
+                    bugs.append(f"Line {orig_lineno} (#{n}/{token_bugs}): {desc[:160]}")
+        return bugs
 
     def _check_regression(self, build_id: str, analysis: dict) -> bool:
         """Return True and log audit event if the failing files were recently fixed.
@@ -490,8 +568,8 @@ class PipelineMixin:
                 for f in scan_result.findings
             ]
 
-        # Resolve bugs_found: prefer LLM output, then synthesize from parse_error/root_cause
-        # so the PR never shows "Bugs Found: 0" when a real error was detected.
+        # bugs_found is already diff-based (set in _run_agents before notification).
+        # Fallbacks only when diff was unavailable (no original code).
         bugs_found_final = fix.get("bugs_found", [])
         if not bugs_found_final:
             if parse_error:
@@ -501,28 +579,7 @@ class PipelineMixin:
                 bugs_found_final = [f"Syntax error{line_hint}: {parse_error[:200]}"]
             elif analysis.get("root_cause"):
                 bugs_found_final = [str(analysis["root_cause"])[:200]]
-
-        # Authoritative bug count via line-by-line diff between original and fix.
-        # This is independent of the LLM's count — we count what actually changed.
-        diff_bug_count = 0
-        if original_code and fix.get("fix_patch"):
-            import re as _re_diff
-            _autoheal_strip = _re_diff.compile(r"\s*#\s*AUTO-HEAL:.*$")
-            orig_lines = [ln.rstrip() for ln in original_code.splitlines()]
-            fix_lines  = [
-                _autoheal_strip.sub("", ln).rstrip()
-                for ln in fix.get("fix_patch", "").splitlines()
-            ]
-            # Strip blank lines for fair comparison (formatting != bug)
-            orig_norm = [ln for ln in orig_lines if ln.strip()]
-            fix_norm  = [ln for ln in fix_lines if ln.strip()]
-            # Count distinct lines in original that don't appear in fix
-            fix_set = set(fix_norm)
-            diff_bug_count = sum(1 for ln in orig_norm if ln not in fix_set)
-            logger.info(
-                "diff_bug_count build_id=%s diff=%d llm=%d",
-                build_id, diff_bug_count, len(bugs_found_final),
-            )
+        diff_bug_count = len(bugs_found_final)
 
         report_data = {
             "colour":         colour,
