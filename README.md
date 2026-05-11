@@ -4,7 +4,7 @@
 
 ### Automated Remediation in CI/CD: Design and Control of an AI-based Code Repair Agent
 
-[![Tests](https://img.shields.io/badge/tests-653%20passing-brightgreen?style=flat-square)](tests/)
+[![Tests](https://img.shields.io/badge/tests-639%20passing-brightgreen?style=flat-square)](tests/)
 [![HITL](https://img.shields.io/badge/HITL-enforced-critical?style=flat-square)](src/orchestrator_mcp/pipeline_mixin.py)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square)](https://python.org)
 [![License](https://img.shields.io/badge/thesis-PA2534%20BTH%202026-lightgrey?style=flat-square)](https://www.bth.se)
@@ -57,9 +57,9 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 
 | Design Decision | Code Location |
 |---|---|
-| 6-agent pipeline: clean → analyse → fetch → generate → evaluate → notify | `src/orchestrator_mcp/pipeline_mixin.py` |
+| 6-agent system: monitor (1) → classify (2) → clean (3) → analyse (4) → repair (5) → notify (6) | `src/orchestrator_mcp/pipeline_mixin.py` |
 | 5-stage log compression, ~90% token reduction before LLM | `src/log_cleaner_mcp/pipeline.py` |
-| Regex + LLM fallback error analysis for 6 error types, blast radius | `src/knowledge_graph_mcp/failure_analyser.py` |
+| Regex + LLM fallback error analysis for 11 error types, blast radius | `src/knowledge_graph_mcp/failure_analyser.py` |
 | Fix generation: retry loop 6–14 attempts, surgical patch or full rewrite | `src/llm_mcp/fix_generator.py` |
 | Proactive AST bug scanner: 63 patterns injected into prompt before LLM sees traceback | `src/llm_mcp/bug_scanner.py` |
 | 14 runtime error hints: NoneType, IndexError, KeyError, RecursionError, ZeroDivision, etc. | `src/llm_mcp/fix_validators.py` |
@@ -103,50 +103,54 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 ## 2. Architecture — The 6 Agents
 
 ```
-┌──────────────────────────────────────────────────────┐
-│           GitHub Actions  ──►  ngrok tunnel           │
-│         POST /tools/handle_build_failure              │
-└──────────────────────┬───────────────────────────────┘
-                       │
-              ┌────────▼────────┐
-              │   Orchestrator  │  :8085
-              │  State machine  │  Pipeline control
-              │  Dedup · Rate   │  Cost tracking
-              └────────┬────────┘
-        ┌──────────────┼──────────────────┐
-        │              │                  │
-┌───────▼──────┐ ┌─────▼──────┐  ┌───────▼──────┐
-│  Agent 3     │ │  Agent 4   │  │   Agent 5    │
-│  Log Cleaner │ │  Error     │  │  Code        │
-│  :8081       │ │  Analyst   │  │  Repairer    │
-│  5-stage     │ │  :8084     │  │  :8086       │
-│  regex +     │ │  Regex +   │  │  Fix memory  │
-│  LLM fallbk  │ │  blast rad │  │  + Bandit    │
-└──────────────┘ └────────────┘  │  + Pylint    │
-                                  └───────┬──────┘
-                                          │
-                                 ┌────────▼────────┐
-                                 │   Agent 6       │
-                                 │  Review & Notify│
-                                 │  :8087          │
-                                 │  Adaptive TL    │
-                                 │  Slack · Teams  │
-                                 └─────────────────┘
+┌────────────────────────────────────────────────────────┐
+│   GitHub Actions / Jenkins  ──►  ngrok tunnel          │
+│        POST /tools/handle_build_failure                │
+└────────────────────────┬───────────────────────────────┘
+                         │
+                ┌────────▼────────┐
+                │   Orchestrator  │  :8085
+                │  State machine  │  Pipeline control
+                │  Dedup · Rate   │  Cost tracking
+                │  🆕 Arch Class. │  🆕 Diff Bug Counter
+                └────────┬────────┘
+        ┌────────────────┼────────────────────┐
+        │                │                    │
+┌───────▼──────┐  ┌──────▼─────┐    ┌────────▼─────┐
+│  Agent 3     │  │  Agent 4   │    │   Agent 5    │
+│  Log Cleaner │  │  Error     │    │  Code        │
+│  :8081       │  │  Analyst   │    │  Repairer    │
+│  5-stage     │  │  :8084     │    │  :8086       │
+│  regex +     │  │  Regex +   │    │  Fix memory  │
+│  LLM fallbk  │  │  blast rad │    │  + Bandit    │
+└──────────────┘  └────────────┘    │  + Pylint    │
+                                    │  + AUTO-HEAL │
+                                    └──────┬───────┘
+                                           │
+                                  ┌────────▼────────┐
+                                  │   Agent 6       │  :8087
+                                  │  Review & Notify│  Traffic light
+                                  │  Slack · Teams  │  Slash commands
+                                  └─────────────────┘
 
 Supporting services:
-  Gerrit MCP :8083 — GitHub PR creation, branch management
-  Jenkins MCP :8082 — Agent 1, pipeline monitor
-  Scheduler — daily digest, task polling
+  Agent 1  Jenkins MCP  :8082 — Build-failure polling
+  Agent 2  Scheduler           — Task classification (Scenario A/B), daily digest
+           Gerrit MCP  :8083  — GitHub PR creation + AUTO-HEAL patch submission
 ```
 
-| Agent | Role |
-|---|---|
-| **Agent 1** — Pipeline Monitor (`:8082`) | Polls GitHub Issues/Jenkins, classifies tasks |
-| **Agent 3** — Log Analyst (`:8081`) | 5-stage regex + LLM fallback log compression |
-| **Agent 4** — Error Analyst (`:8084`) | Regex + LLM analysis, blast radius, affected files |
-| **Agent 5** — Code Repairer (`:8086`) | Fix generation with memory, Bandit, Pylint |
-| **Agent 6** — Review & Notify (`:8087`) | Adaptive traffic light + Slack/Teams notification |
-| **Orchestrator** (`:8085`) | Central pipeline, state machine, webhooks |
+| # | Agent | Service | Port | Role |
+|---|---|---|---|---|
+| 1 | **Pipeline Monitor** | `jenkins-mcp` | `:8082` | Polls Jenkins for build failures, fetches raw logs |
+| 2 | **Task Inspector** | `scheduler` | — | Polls GitHub Issues / Jira, classifies tasks (Scenario A/B/YELLOW) |
+| 3 | **Log Analyst** | `log-cleaner-mcp` | `:8081` | 5-stage regex + LLM fallback log compression (~90% reduction) |
+| 4 | **Error Analyst** | `knowledge-graph-mcp` | `:8084` | Regex + LLM analysis, 11 error types, blast radius, affected files |
+| 5 | **Code Repairer** | `llm-mcp` | `:8086` | Fix generation with memory + architecture context, Bandit, Pylint, AUTO-HEAL annotations |
+| 6 | **Review & Notify** | `notification-mcp` | `:8087` | File + bug + confidence traffic light, Slack/Teams notifications, slash commands |
+| — | **Orchestrator** | `orchestrator-mcp` | `:8085` | Central pipeline, state machine, webhooks. Runs two in-process helpers between agents: 🆕 **Architecture Classifier** (after Agent 4) and 🆕 **Diff Bug Counter** (after Agent 5). |
+| — | **PR Manager** | `gerrit-mcp` | `:8083` | Creates GitHub PRs with structured report, applies AUTO-HEAL patches, enforces protected paths |
+
+> **Note on numbering:** Agents 1 and 2 are *trigger* agents that run independently — Agent 1 watches Jenkins, Agent 2 watches issue trackers. When either detects work, they hand off to the **Orchestrator**, which then runs the **in-pipeline agents 3 → 4 → 5 → 6** with two in-process helpers (Architecture Classifier, Diff Bug Counter) and a supporting service (Gerrit MCP for PR creation).
 
 ---
 
@@ -164,7 +168,7 @@ POST /tools/handle_build_failure
      • Extract stack traces  •  LLM fallback if < 50% reduction
   │
   ▼  [Agent 4]  Analyse failure
-     • Regex → 6 error types  •  Blast radius (LOW / MEDIUM / HIGH)
+     • Regex → 11 error types  •  Blast radius (LOW / MEDIUM / HIGH)
      • Affected files from pytest output and tracebacks
   │
   ├─ Regression check ──────── same files recently fixed? ──► BLOCKED ⛔
@@ -172,12 +176,26 @@ POST /tools/handle_build_failure
   │
   ▼  [Gerrit MCP]  Fetch file content (code context, max 3 files)
   │
+  ▼  🆕 [Architecture Classifier]  Identify the architecture layer
+     • Classify into 7 layers (frontend/backend/db/infra/tests/mobile/data-ml)
+     • Detect framework (152 supported) · language (82) · runtime
+     • Sub-layer (55 patterns: API endpoint, Migration, Auth, K8s workload, ...)
+     • Severity boost for high-risk areas (Migration +30%, Auth +30%, K8s +20%)
+     • Inject layer-specific guidance into the AI prompt
+  │
   ▼  [Agent 5]  Generate fix
-     • Inject fix memory (past 3 relevant outcomes)
+     • Inject fix memory (past 3 relevant outcomes) + architecture context
      • Complexity score → model tier (7 B / 32 B / 70 B+)
      • LLM call  →  parse  →  apply patch
+     • Tier-0 AUTO-HEAL parsing: AI annotates every changed line with
+       `# AUTO-HEAL: was '...' (bug type) -> fix`. Parsed back into the bug list.
      • Secret scan  •  Bandit  •  Pylint
      • Retry on security issues (up to budget)
+  │
+  ▼  🆕 [Diff Bug Counter]  Authoritative token-level diff
+     • Walks original vs fix line by line
+     • Counts each distinct token-group change as 1 bug
+     • Same source feeds traffic-light, PR report, and Slack — they always agree
   │
   ▼  [Agent 6]  Evaluate & Notify
      • Traffic light based on: files affected + bugs per file + AI confidence
@@ -186,18 +204,19 @@ POST /tools/handle_build_failure
      • 🔴 RED:    >5 files   OR   >30 bugs/file  OR   confidence < 60%
   │
   ├─── 🟢 GREEN  ──► PR opened · Slack Approve / Reject buttons (fast-track)
-  │                  e.g. "1 file, 14 bugs, confidence 93%"
+  │                  Decision Reason: "1 file, 19 bugs, confidence 95%"
   │                  Regression watch activated (60 min)
   │
   ├─── 🟡 YELLOW ──► PR opened · Slack Approve / Reject buttons (careful review)
-  │                  e.g. "4 files affected — careful review required (80%)"
+  │                  Decision Reason: "4 files affected — careful review required (80%)"
   │                  Human decision feeds adaptive thresholds + fix memory
   │
   ├─── 🔴 RED    ──► No PR · BLOCKED · Slack RED alert sent immediately
-  │                  e.g. "Too many bugs per file (35 > 30) — file too broken"
+  │                  Decision Reason: "Too many bugs per file (35 > 30)"
   │                  Manual intervention required
   │
   └─── ⛔ BLOCKED ─► Regression loop OR 422 too-complex
+                     Smart retry: same error type → allow 1 extra attempt
                      Slack RED alert with reason · BLOCKED state in workflow
                      Audit event logged · no fix attempted
 ```
@@ -279,7 +298,10 @@ Example record:
 
 Three complementary mechanisms:
 
-1. **Regression blocking** — `_check_regression()` returns `True` if the failing files were fixed within the last 60 minutes → workflow advances to `BLOCKED`, Slack RED alert sent immediately with the reason, no new fix generated
+1. **Regression blocking with smart retry** — `_check_regression()` watches affected files for 60 minutes. Behaviour:
+   - Same file, **same** error type, first re-failure → **allow 1 retry** (AI may need another pass)
+   - Same file, same error type, second re-failure → BLOCKED + Slack RED
+   - Same file, **different** error type → BLOCKED (likely new bug introduced by the fix)
 2. **CI guard** — GitHub Actions trigger steps require `!startsWith(head_commit.message, 'auto-heal')`, so healer commits never re-trigger the healer
 3. **Protected paths** — AI cannot modify `.github/`, `Dockerfile`, `pyproject.toml`, `requirements.txt`, or any infra file
 
@@ -454,7 +476,7 @@ PENDING
                         ├─► AWAITING_REVIEW ──► APPLYING_FIX ──► COMPLETED ✅
                         │   (HITL review)  └─────────────────► BLOCKED ⛔
                         └─► BLOCKED ⛔
-                             (RED traffic light / safety override)
+                             (RED traffic light: >5 files, >30 bugs/file, conf <60%)
                              + Slack RED
 
 Any state ──► FAILED  (on unhandled agent exception)
@@ -520,10 +542,20 @@ Human approve/reject decisions update the stored outcome in real time.
 
 ### Adaptive Thresholds (`src/shared/adaptive_thresholds.py`)
 
-After 5+ human decisions for an error type:
-- `new_GREEN  = mean(approved_confidences) − 0.03`
-- `new_YELLOW = mean(rejected_confidences) + 0.03`
-- Safe bounds: GREEN ∈ [0.70, 0.95], YELLOW ∈ [0.45, 0.80]
+The module still tracks two thresholds per error type (legacy `green_threshold` ≥ 0.85, `yellow_threshold` ≥ 0.60), but the **new traffic light only uses the YELLOW threshold as the confidence floor**:
+
+```python
+# In traffic_light_evaluator.py
+_, yellow_t = adaptive_thresholds.get_thresholds(error_type)
+confidence_floor = max(MIN_CONFIDENCE, yellow_t)   # 0.60 default, adapts up
+```
+
+After 5+ human decisions for an error type, `yellow_t` self-calibrates:
+- `new_yellow = mean(rejected_confidences) + 0.03`  (slightly above what humans reject)
+- Safe bounds: `yellow ∈ [0.45, 0.80]`, `green ∈ [0.70, 0.95]`
+- Stored in append-only JSONL, cached in memory
+
+This means the system adapts to your team's risk tolerance per error type — e.g. you may accept lower-confidence SYNTAX_ERROR fixes than TYPE_ERROR fixes.
 
 ### Regression Watch (`src/shared/heal_verifier.py`)
 
@@ -637,14 +669,14 @@ Every auto-heal fix opens a GitHub Pull Request with a detailed structured repor
 
 | Section | Content |
 |---|---|
-| 📊 **Summary** | Build ID, traffic light, confidence + 🟩🟨🟥 emoji bar, **Decision Reason** (e.g. "1 file, 19 bugs, confidence 95%"), error type, blast radius, **bugs found** (token-level diff count), AI attempts, **model used** (e.g. `qwen/qwen2.5-coder-32b-instruct`), time to fix |
+| 📊 **Summary** | Build ID, traffic light, confidence + 🟩🟨🟥 emoji bar, **Decision Reason** (e.g. "1 file, 19 bugs, confidence 95%"), **Architecture Layer** (e.g. "⚙️ Backend · API endpoint · FastAPI · Python on CPython · 🔗 also: DATABASE · ⚠️ +15% risk"), error type, blast radius, **bugs found** (token-level diff count), AI attempts, **model used** (e.g. `qwen/qwen2.5-coder-32b-instruct`), time to fix |
 | 🔍 **Error Analysis** | Root cause, error type detail, blast radius explanation |
-| 🐛 **Bug Report** | Per-bug list with exact line numbers and AUTO-HEAL descriptions |
+| 🐛 **Bug Report** | Per-bug list with exact line numbers and AUTO-HEAL descriptions (from token-level diff) |
 | 🛠️ **Fix Strategy** | AI explanation of fix approach + detailed description |
 | 📁 **Affected Files** | List of all files modified |
 | 🔄 **Full File Before vs After** | Collapsible: **annotated** original with `# ← BUG: <description>` markers + fixed file with `# AUTO-HEAL:` comments |
 | 🔒 **Security Analysis** | Bandit scan results on the generated fix |
-| ⚠️ **Regression Risk** | LLM-produced assessment of side-effects (e.g. "return type changed from float to int — callers may break") |
+| ⚠️ **Regression Risk** | LLM-produced assessment of side-effects (falls back to layer-specific risk note when LLM is silent) |
 | 🧪 **Test Recommendations** | LLM-produced concrete test suggestions for the specific fix |
 | 🤖 **Agent Pipeline** | Visual diagram of the 4-step pipeline with attempt count |
 | 📝 **Full Patch** | Collapsible raw patch (up to 8000 chars) |
@@ -661,19 +693,28 @@ def partition(arr, l, h):
         if arr[k] > piv:    # ← BUG: corrected to '<'
 ```
 
-### Bug → Fix Table Format
+### Bug Report Format
 
-For each bug identified by the static scanner:
+The PR Bug Report uses the token-level diff result. Each entry shows the line number and the AUTO-HEAL description the AI wrote inline:
 
 ```
-### 1. 🔴 Line `14` — `off_by_one_range` (HIGH)
+🐛 Bug Report — 19 bug(s) with exact line numbers
 
-> range(len(x)+1) silently skips last element
+1. 🔴 Line 2: was 'arr[h + 1]' (out of bounds) -> correct pivot
+2. 🔴 Line 3: was 'l + 1' (off-by-one) -> corrected start index
+3. 🔴 Line 5: was 'range(l, l)' (empty range) -> fixed upper bound
+4. 🔴 Line 6: was 'arr[k] > piv' (wrong comparison) -> corrected to '<'
+...
+```
 
-| | Code |
-|---|------|
-| 🔴 Bug (line 14) | `for i in range(len(arr) + 1):` |
-| ✅ Replacement    | `use range(len(x))` |
+The annotated **BEFORE** file shows each bug inline so reviewers can see them in context:
+
+```python
+def partition(arr, l, h):
+    piv = arr[h + 1]    # ← BUG: correct pivot
+    idx = l + 1         # ← BUG: corrected start index
+    for k in range(l, l):   # ← BUG: fixed upper bound
+        if arr[k] > piv:    # ← BUG: corrected to '<'
 ```
 
 This makes it immediately clear **what was wrong on which line** and **exactly what the fix is**.
@@ -693,6 +734,7 @@ Both GREEN and YELLOW fixes send a rich Slack message with full analysis + Appro
 | Header | Colour-coded title (🚀 GREEN / ⚠️ YELLOW / 🚨 RED) |
 | Status banner | Status label, **emoji confidence bar** (🟩🟨🟥), time to fix, PR link |
 | Build info (2-column) | Build ID, error type, blast radius, **bug count** |
+| 🏛️ Architecture | Layer (🎨/⚙️/🗄️/🐳/🧪/📱/🧠), sub-layer, framework, language, runtime, cross-layers, risk note |
 | 🔍 Root cause | One-line root cause |
 | 🐛 Bugs preview | Top 3 bugs with line numbers + AUTO-HEAL descriptions |
 | 🔍 "View all N bugs on GitHub" | Button (when bugs > 3) — opens PR for full list |
@@ -715,6 +757,9 @@ Confidence ›  🟩🟩🟩🟩🟩🟩🟩🟩🟩⬜  95%
 
 💥 Blast Radius      🐛 Bugs Found
 `LOW`                19 bug(s)
+
+🏛️ Architecture — ⚙️ Backend · API endpoint · `FastAPI` · `Python` on `CPython`
+_API contract may have changed — re-test all consuming clients (frontend, mobile, integrations)._
 
 🔍 Root Cause
 > SyntaxError: expected ':'
@@ -745,14 +790,24 @@ Human clicks feed back to `fix_memory` and `adaptive_thresholds`.
 ### RED & BLOCKED — Immediate Alert
 
 ```
-🔴 Fix Blocked
-Build: build-12345
-Files: src/complex_module.py
-Duration: 120s  |  Reason: Low confidence / regression loop.
+🚨  Auto-Heal Fix Blocked — Manual Intervention
+
+Status   ›  🔴 FIX BLOCKED
+Confidence ›  🟥🟥🟥🟥⬜⬜⬜⬜⬜⬜  45%
+⏱️  Failed in 18s  |  🚫  No PR created
+
+🆔 Build ID: build-12345
+📁 Files: src/complex_module.py
+💥 Reason: AI confidence too low (45% < 60%)
+
 Manual intervention required.
 ```
 
-This also fires for regression loops ("Regression loop detected — same file fixed recently") and 422-rejected fixes ("Fix generation rejected — too complex").
+This also fires for:
+- **Regression loops** — same file failed again with same error type after retry already used
+- **422 too-complex** — fix generation rejected as structurally unrecoverable
+- **>5 files affected** — change scope too wide
+- **>30 bugs in any file** — file too broken for reliable AI fix
 
 ### `/autoheal` Slash Commands
 
@@ -843,7 +898,7 @@ Every morning at 08:00 UTC: builds processed, success rates, top error types, tr
 
 ## 15. Test Suite
 
-**653 tests passing** · 9 pre-existing failures in blast-radius tests (unrelated to any recent changes)
+**639 unit tests passing** · 23 traffic-light tests need updating (still test the deprecated blast-radius score formula — the new logic uses files + bugs/file + AI confidence, see Section 5)
 
 <details>
 <summary>Unit test coverage (click to expand)</summary>
@@ -861,9 +916,11 @@ Every morning at 08:00 UTC: builds processed, success rates, top error types, tr
 | Model Fallback | chain, AllModelsFailed, slot reset |
 | Workflow Engine | state transitions, InvalidTransitionError, pruning |
 | GitHub Webhook | HMAC signature, branch parsing |
-| Traffic Light | adaptive thresholds, safety override, score formula |
+| Traffic Light | file + bug + confidence rules, RED overrides, adaptive floor |
+| Architecture Classifier | 152 frameworks, 82 languages, 55 sub-layers, cross-layer detection, severity boosts |
+| Diff Bug Counter | token-level diff, whitespace normalisation, AUTO-HEAL parsing |
 | Log Cleaner | each of 5 filters individually + full pipeline |
-| Error Analyst | all 6 error types, pytest format, blast radius |
+| Error Analyst | all 11 error types, pytest format, blast radius |
 | Code Repairer | parsing, retry, FixTooLongError, SecretLeakError |
 | Gerrit MCP | PR creation, rate-limit headers, code fetching |
 
@@ -990,9 +1047,9 @@ Settings → Webhooks → Add webhook:
 
 | Variable | Default | Description |
 |---|---|---|
-| `FIX_MEMORY_PATH` | `/var/log/auto-healer/fix_memory.jsonl` | AI fix history |
-| `ADAPTIVE_THRESHOLDS_PATH` | `/var/log/auto-healer/adaptive_thresholds.jsonl` | Threshold learning |
-| `AUDIT_LOG_PATH` | `/var/log/auto-healer/audit.jsonl` | Audit trail |
+| `FIX_MEMORY_PATH` | `/var/log/auto-healer/fix_memory.jsonl` | AI fix history (persisted via `autoheal-data` Docker volume) |
+| `ADAPTIVE_THRESHOLDS_PATH` | `/var/log/auto-healer/adaptive_thresholds.jsonl` | Threshold learning (persisted) |
+| `AUDIT_LOG_PATH` | `/var/log/auto-healer/audit.jsonl` | Audit trail (persisted) |
 | `MODEL_LOW_PRIMARY` | `qwen/qwen2.5-coder-7b-instruct` | LOW complexity model |
 | `MODEL_MED_PRIMARY` | `qwen/qwen2.5-coder-32b-instruct` | MEDIUM complexity model |
 | `DIGEST_HOUR_UTC` | `8` | Daily Slack digest hour |
@@ -1026,16 +1083,17 @@ auto-healing-devops-platform/
 │
 ├── src/
 │   ├── shared/                     # Shared infrastructure
+│   │   ├── architecture_classifier.py  # 7 layers · 152 frameworks · 82 languages · 55 sub-layers
 │   │   ├── quality_gates.py        # Bandit + Pylint quality gates
 │   │   ├── audit_log.py            # Append-only JSONL audit trail
 │   │   ├── fix_memory.py           # AI learning from past outcomes
-│   │   ├── adaptive_thresholds.py  # Self-calibrating traffic light thresholds
-│   │   ├── heal_verifier.py        # 60-min regression watch
+│   │   ├── adaptive_thresholds.py  # Self-calibrating confidence floor per error type
+│   │   ├── heal_verifier.py        # 60-min regression watch with smart retry
 │   │   ├── secret_scanner.py       # 11-pattern hardcoded credential detection
 │   │   ├── prompt_compressor.py    # ~90% token reduction
 │   │   ├── task_complexity.py      # Deterministic complexity scorer
 │   │   ├── resilience.py           # Circuit breaker + global fallback
-│   │   ├── nim_client.py           # NVIDIA NIM client, 4-slot fallback
+│   │   ├── nim_client.py           # NVIDIA NIM client, 4-slot fallback + last_model tracking
 │   │   └── models.py               # Domain models, enums
 │   │
 │   ├── orchestrator_mcp/           # :8085 — Central pipeline controller
@@ -1053,7 +1111,7 @@ auto-healing-devops-platform/
 │   │   └── fix_parsers.py          # Surgical patch + JSON parser
 │   │
 │   ├── knowledge_graph_mcp/        # :8084 — Agent 4, Error Analyst
-│   │   ├── failure_analyser.py     # Regex + LLM, 6 error types, blast radius
+│   │   ├── failure_analyser.py     # Regex + LLM, 11 error types, blast radius
 │   │   └── dependency_tracker.py
 │   │
 │   ├── log_cleaner_mcp/            # :8081 — Agent 3
@@ -1061,9 +1119,10 @@ auto-healing-devops-platform/
 │   │   └── filters/                # ansi · timestamp · dedup · noise · stacktrace
 │   │
 │   ├── notification_mcp/           # :8087 — Agent 6, Review & Notify
-│   │   ├── traffic_light_evaluator.py  # Adaptive thresholds
-│   │   ├── slack_notifier.py           # Block Kit + interactive buttons
-│   │   ├── slack_slash_handler.py      # 9 slash commands
+│   │   ├── traffic_light_evaluator.py  # file + bug/file + confidence rules
+│   │   ├── slack_notifier.py           # Block Kit, emoji bars (🟩🟨🟥), Architecture section
+│   │   ├── slack_slash_handler.py      # 9 slash commands (+ help fallback) with build-id prefix stripping
+│   │   ├── slash_responses.py          # Rich Block Kit responses with emoji + helpful errors
 │   │   └── teams_notifier.py
 │   │
 │   ├── gerrit_mcp/                 # :8083 — GitHub PR manager
@@ -1075,7 +1134,7 @@ auto-healing-devops-platform/
 │       └── task_classifier.py      # Agent 2: Scenario A/B classification
 │
 └── tests/
-    ├── unit/                       # 653 passing (no Docker)
+    ├── unit/                       # 639 passing (no Docker)
     └── integration/                # End-to-end pipeline tests
 ```
 
