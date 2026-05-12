@@ -64,6 +64,11 @@ _RE_WAS_CATEGORY = re.compile(r"was\s+[^(]*\(([^)]+)\)")
 _RE_HAS_WAS = re.compile(r"\bwas\b", re.IGNORECASE)
 # Prefixes that signal a style/rename change, not a bug fix
 _STYLE_PREFIXES = ("introduced", "renamed", "added for", "replaced for", "refactored")
+# Patterns the LLM writes in Phase 2 to state how many bugs it found
+_RE_PHASE2_COUNT = re.compile(
+    r"\b(?:identified|detected|found|diagnosed|spotted)\s+(\d+)\s+(?:distinct\s+|separate\s+|total\s+)?bugs?\b",
+    re.IGNORECASE,
+)
 
 
 def _autoheal_key(desc: str) -> str:
@@ -84,6 +89,21 @@ def _autoheal_key(desc: str) -> str:
         return desc.split(":")[0].lower().strip()
     words = desc.lower().split()
     return " ".join(words[:2]) if len(words) >= 2 else (words[0] if words else desc)
+
+
+def _extract_phase2_count(explanation: str) -> int | None:
+    """Return the bug count the LLM stated in its Phase 2 diagnosis.
+
+    The explanation reliably contains phrases like 'Identified 15 bugs' or
+    'Detected 12 bugs'.  This is more trustworthy than the bugs_found list,
+    which can be inflated (renames) or deflated (merged descriptions).
+    Returns None when unparseable or outside a plausible 1-50 range.
+    """
+    m = _RE_PHASE2_COUNT.search(explanation)
+    if not m:
+        return None
+    n = int(m.group(1))
+    return n if 1 <= n <= 50 else None
 
 
 def _is_style_change(desc: str) -> bool:
@@ -520,13 +540,28 @@ class FixGenerator:
 
                     if _autoheal_bugs:
                         changed_lines = _autoheal_lines
+
+                        # Three-signal count resolution (highest → lowest trust):
+                        #  1. Phase 2 explanation count  – LLM's own stated diagnosis
+                        #  2. AUTO-HEAL proximity-dedup  – parses actual changed lines
+                        #  3. Raw bugs_found length       – least reliable (inflated/merged)
+                        phase2_n = _extract_phase2_count(explanation_text)
+                        autoheal_n = len(_autoheal_bugs)
+                        # Use Phase 2 count when available; fall back to AUTO-HEAL.
+                        target_n = phase2_n if phase2_n else autoheal_n
+
                         if not _llm_bugs_meaningful(bugs_found):
-                            bugs_found = _autoheal_bugs
-                        elif len(bugs_found) > len(_autoheal_bugs):
-                            # LLM inflated the list with per-line rename entries.
-                            # AUTO-HEAL proximity-dedup is more accurate; cap to its count
-                            # while keeping the LLM's richer descriptions.
-                            bugs_found = bugs_found[: len(_autoheal_bugs)]
+                            pool = _autoheal_bugs
+                        else:
+                            pool = bugs_found
+
+                        # Build final list: prefer pool descriptions, pad with
+                        # AUTO-HEAL entries when pool is short, trim when too long.
+                        if len(pool) >= target_n:
+                            bugs_found = pool[:target_n]
+                        else:
+                            extra = _autoheal_bugs[len(pool):target_n]
+                            bugs_found = pool + extra
 
                 # Tier 1 fallback: synthesize from changed_lines (surgical mode).
                 if not bugs_found and changed_lines:
