@@ -10,7 +10,7 @@ from src.shared.models import BlastRadius
 MAX_DEPTH = 5
 
 _CRITICAL_PATHS = frozenset({
-    "config/", "__init__.py", "setup.py", "pyproject.toml",
+    "config/", "__init__.py", "setup.py", "pyproject.toml", "tests/",
 })
 
 
@@ -50,18 +50,18 @@ class DependencyTracker:
 
         Rules:
         - Any critical infrastructure file (config/, __init__.py, setup.py,
-          pyproject.toml, auth/, payments/) → HIGH (always needs manual review)
-        - 10+ files → HIGH (sweeping change, human should review)
-        - 4–9 files → MEDIUM (multi-file fix, AI handles it but flags YELLOW)
-        - 0–3 files → LOW (typical bug fix, AI auto-handles)
+          pyproject.toml, tests/) → HIGH (always needs manual review)
+        - 6+ files → HIGH (sweeping change, human should review)
+        - 2–5 files → MEDIUM (multi-file fix, flags YELLOW)
+        - 0–1 files → LOW (typical bug fix)
         """
         count = len(affected_files)
         has_critical = any(
             any(cp in f for cp in _CRITICAL_PATHS)
             for f in affected_files
         )
-        if has_critical or count >= 10:
+        if has_critical or count >= 6:
             return BlastRadius.HIGH
-        if count >= 4:
+        if count >= 2:
             return BlastRadius.MEDIUM
         return BlastRadius.LOW

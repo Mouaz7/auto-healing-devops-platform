@@ -31,10 +31,16 @@ def apply_surgical_patch(original: str, changed_lines: dict) -> str:
     return "".join(lines)
 
 
+class TruncatedResponseError(ValueError):
+    """Raised when the LLM response was cut off before JSON was complete."""
+
+
 def parse_response(response: str) -> dict:
     """Parse JSON from an LLM response.
 
     Accepts bare JSON or JSON wrapped in a markdown code block.
+    Raises TruncatedResponseError when the response looks cut off mid-JSON
+    so the caller can retry with a higher token limit.
     """
     try:
         return dict(json.loads(response))
@@ -43,6 +49,16 @@ def parse_response(response: str) -> dict:
 
     match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", response, re.DOTALL)
     if match:
-        return dict(json.loads(match.group(1)))
+        try:
+            return dict(json.loads(match.group(1)))
+        except json.JSONDecodeError:
+            pass
+
+    # Detect truncation: response starts with '{' but never closes it.
+    stripped = response.strip()
+    if stripped.startswith("{") and not stripped.endswith("}"):
+        raise TruncatedResponseError(
+            f"LLM response was truncated before JSON closed: {response[:200]!r}"
+        )
 
     raise ValueError(f"Could not parse LLM response as JSON: {response[:200]!r}")

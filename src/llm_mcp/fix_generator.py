@@ -1,26 +1,38 @@
-"""Agent 5: Fix generator — produces code fixes via NIM LLM with quality checks.
+"""Agent 5: Fix generator — orchestrates LLM calls with quality gates.
 
 Constraints (per spec):
   - Max 100 lines changed (surgical) / 600 (complex rewrite)
-  - Rejects fixes that refactor or change unrelated code
-  - Max 8 retries on LLM failure (9 attempts total); attempt budget scales
-    with bug count up to 14 attempts for 10+ bug files
+  - Max 8 retries; budget scales with bug count (up to 14 for 10+ bug files)
   - 120 s timeout per LLM call
-  - Bandit + Pylint + secret scan run on generated code before returning
+  - Bandit + Pylint + secret scan before returning
 
-Helpers live in sibling modules to keep this file focused on the loop:
-  - fix_validators.py — syntax + runtime checks
-  - fix_prompts.py    — retry-prompt builder
-  - fix_parsers.py    — surgical patch + JSON parse
+Sibling modules (one responsibility each):
+  - fix_exceptions.py    — exception types
+  - fix_prompt_builder.py — prompt construction + retry budget
+  - fix_code_handler.py  — extract fix code, validate length, resolve bugs_found
+  - autoheal_parser.py   — AUTO-HEAL comment parsing
+  - fix_validators.py    — syntax + runtime checks
+  - fix_prompts.py       — retry-prompt builder
+  - fix_parsers.py       — surgical patch + JSON parse
 """
 from __future__ import annotations
 
-import ast
 import logging
-import re
 
-from src.llm_mcp.bug_scanner import BugPatternScanner
-from src.llm_mcp.fix_parsers import apply_surgical_patch, parse_response
+from src.llm_mcp.fix_code_handler import (
+    enforce_length_limits,
+    extract_fix_code,
+    resolve_bugs_found,
+)
+from src.llm_mcp.fix_exceptions import (
+    FixStillBrokenError,
+    FixTooLongError,
+    NoCodeContextError,
+    SecretLeakError,
+    SyntaxFixExhaustedError,
+)
+from src.llm_mcp.fix_parsers import apply_surgical_patch, parse_response, TruncatedResponseError
+from src.llm_mcp.fix_prompt_builder import build_fix_prompt, compute_attempt_budget
 from src.llm_mcp.fix_prompts import build_retry_prompt, extract_bug_list
 from src.llm_mcp.fix_validators import (
     clean_files,
@@ -29,16 +41,6 @@ from src.llm_mcp.fix_validators import (
     validate_fix_runtime,
     validate_fix_syntax,
 )
-from src.llm_mcp.prompt_templates import (
-    COMPLEX_MODE_THRESHOLD,
-    COMPLEX_REPAIR_TEMPLATE,
-    COMPLEX_SYSTEM_PROMPT,
-    MAX_FIX_LINES,
-    MAX_FIX_LINES_COMPLEX,
-    MAX_RETRIES,
-    SCENARIO_A_TEMPLATE,
-    SYSTEM_PROMPT,
-)
 from src.shared.config import AGENT_CONFIGS
 from src.shared.fix_memory import build_memory_context, fix_memory
 from src.shared.metrics import quality_gate_results
@@ -46,113 +48,13 @@ from src.shared.model_fallback import AllModelsFailed
 from src.shared.models import CodeFix, FailureAnalysis
 from src.shared.nim_client import NimClient, SlotParams
 from src.shared.prompt_compressor import compress_log
-from src.shared.quality_gates import (
-    evaluate_quality,
-    run_bandit_scan,
-    run_pylint_check,
-)
+from src.shared.quality_gates import evaluate_quality, run_bandit_scan, run_pylint_check
 from src.shared.secret_scanner import scan_for_secrets
+from src.llm_mcp.prompt_templates import COMPLEX_MODE_THRESHOLD
 from src.shared.task_complexity import score_complexity
 
 logger = logging.getLogger(__name__)
 
-_AUTOHEAL_PATTERN = re.compile(r"#\s*AUTO-HEAL:\s*(.+)")
-_AUTOHEAL_PROXIMITY = 4  # max lines between two fixes of the same logical bug
-
-_RE_WAS_SNIPPET = re.compile(r"was\s+'([^']+)'")
-_RE_WAS_CATEGORY = re.compile(r"was\s+[^(]*\(([^)]+)\)")
-_RE_HAS_WAS = re.compile(r"\bwas\b", re.IGNORECASE)
-# Prefixes that signal a style/rename change, not a bug fix
-_STYLE_PREFIXES = ("introduced", "renamed", "added for", "replaced for", "refactored")
-# Patterns the LLM writes in Phase 2 to state how many bugs it found
-_RE_PHASE2_COUNT = re.compile(
-    r"\b(?:identified|detected|found|diagnosed|spotted)\s+(\d+)\s+(?:distinct\s+|separate\s+|total\s+)?bugs?\b",
-    re.IGNORECASE,
-)
-
-
-def _autoheal_key(desc: str) -> str:
-    """Deduplication key for an AUTO-HEAL description.
-
-    Determines whether two AUTO-HEAL comments in the same function represent
-    the same logical bug (e.g. both bounds of a binary-search fix).
-
-    Priority: was-expression → was-category → colon-phrase → first two words.
-    """
-    m = _RE_WAS_SNIPPET.search(desc)
-    if m:
-        return m.group(1).strip().lower()
-    m = _RE_WAS_CATEGORY.search(desc)
-    if m:
-        return m.group(1).lower().strip()
-    if ":" in desc:
-        return desc.split(":")[0].lower().strip()
-    words = desc.lower().split()
-    return " ".join(words[:2]) if len(words) >= 2 else (words[0] if words else desc)
-
-
-def _extract_phase2_count(explanation: str) -> int | None:
-    """Return the bug count the LLM stated in its Phase 2 diagnosis.
-
-    The explanation reliably contains phrases like 'Identified 15 bugs' or
-    'Detected 12 bugs'.  This is more trustworthy than the bugs_found list,
-    which can be inflated (renames) or deflated (merged descriptions).
-    Returns None when unparseable or outside a plausible 1-50 range.
-    """
-    m = _RE_PHASE2_COUNT.search(explanation)
-    if not m:
-        return None
-    n = int(m.group(1))
-    return n if 1 <= n <= 50 else None
-
-
-def _is_style_change(desc: str) -> bool:
-    """True when an AUTO-HEAL comment describes a rename/style change, not a bug.
-
-    Variable renames (e.g. `l` → `low`) produce comments like
-    "introduced proper index for Lomuto scheme" that have no 'was ...' clause.
-    Counting those as bugs inflates the bug count when the LLM rewrites variables.
-    """
-    if _RE_HAS_WAS.search(desc):
-        return False
-    lower = desc.lower().strip()
-    return any(lower.startswith(p) for p in _STYLE_PREFIXES)
-
-
-def _llm_bugs_meaningful(bugs: list) -> bool:
-    """True when the LLM returned a real, non-degenerate bugs_found list.
-
-    Falls through to AUTO-HEAL heuristics when the list is empty, all-identical
-    (LLM echoed the same error N times), or a single entry too short to be useful.
-    """
-    if not bugs:
-        return False
-    entries = {str(x).strip() for x in bugs}
-    if len(entries) == 1 and (len(bugs) > 1 or len(next(iter(entries))) < 15):
-        return False
-    return True
-
-
-def _build_fn_scopes(source: str) -> dict[int, str]:
-    """Map every line number in *source* to its enclosing function scope string.
-
-    Returns an empty dict on SyntaxError so callers degrade gracefully to
-    module-level (no-scope) deduplication.
-    """
-    scopes: dict[int, str] = {}
-    try:
-        for node in ast.walk(ast.parse(source)):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                end = getattr(node, "end_lineno", node.lineno)
-                scope = f"{node.name}:{node.lineno}"
-                for ln in range(node.lineno, end + 1):
-                    scopes[ln] = scope
-    except SyntaxError:
-        pass
-    return scopes
-
-
-# Inference params for the heavyweight coder models
 _SLOT_PARAMS: SlotParams = {
     "PRIMARY":    (0.7, 0.8, 4096),
     "FALLBACK_1": (1.0, 0.95, 8192),
@@ -160,68 +62,28 @@ _SLOT_PARAMS: SlotParams = {
     "FALLBACK_3": (0.6, 0.7, 4096),
 }
 
-
-# --- Exceptions -------------------------------------------------------
-
-class FixTooLongError(ValueError):
-    """Raised when the generated fix exceeds MAX_FIX_LINES."""
-
-
-class SecretLeakError(ValueError):
-    """Raised when the generated fix contains hardcoded secrets."""
-
-
-class FixStillBrokenError(ValueError):
-    """LLM cannot produce a runtime-correct fix after retries.
-
-    The fix compiled but still infinite-looped or crashed when executed.
-    Routes to BLOCKED so a human can intervene.
-    """
-
-
-class NoCodeContextError(ValueError):
-    """generate_fix called without real code_context.
-
-    Without the actual source file, the LLM can only hallucinate. Better to
-    fail loudly so the orchestrator routes the failure to human review.
-    """
-
-
-class SyntaxFixExhaustedError(ValueError):
-    """Every retry produced fix_code that fails to compile.
-
-    Treated as BLOCKED (HTTP 422), not 503 — more retries from the
-    orchestrator will not help; the LLM kept producing invalid Python.
-    """
-
-
-# --- Backwards-compat re-exports for tests / old imports --------------
-# Tests historically import these private names from this module. The real
-# implementations now live in sibling modules; these aliases keep imports
-# stable without forcing every test to update.
-_clean_files = clean_files
-_count_bugs_in_logs = count_bugs_in_logs
-_count_syntax_errors = count_syntax_errors
-_validate_fix_syntax = validate_fix_syntax
+# Backwards-compat re-exports — tests import these private names from here.
+_clean_files          = clean_files
+_count_syntax_errors  = count_syntax_errors
+_validate_fix_syntax  = validate_fix_syntax
 _validate_fix_runtime = validate_fix_runtime
-_build_retry_prompt = build_retry_prompt
-_extract_bug_list = extract_bug_list
+_build_retry_prompt   = build_retry_prompt
+_extract_bug_list     = extract_bug_list
 _apply_surgical_patch = apply_surgical_patch
-_parse_response = parse_response
+_parse_response       = parse_response
 
 
 class FixGenerator:
-    """Generate code fixes via the NIM LLM fallback chain.
-
-    Args:
-        nim_client: Configured NimClient for the code_repairer agent.
-            Pass ``None`` in tests to disable real LLM calls.
-    """
+    """Orchestrate LLM calls to produce a validated CodeFix."""
 
     def __init__(self, nim_client: NimClient | None = None) -> None:
         self._nim = nim_client
 
-    def generate_fix(  # pylint: disable=too-many-locals
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
+
+    def generate_fix(
         self,
         analysis: FailureAnalysis,
         code_context: str,
@@ -229,23 +91,15 @@ class FixGenerator:
         arch_layer: str = "",
         arch_fix_hint: str = "",
     ) -> CodeFix:
-        """Generate a code fix for *analysis*.
-
-        Retries up to MAX_RETRIES times on LLM/parse errors. Runs bandit +
-        pylint + secret scan on the generated code.
+        """Generate a validated code fix for *analysis*.
 
         Raises:
-            AllModelsFailed: every fallback model failed.
-            FixTooLongError: fix exceeds MAX_FIX_LINES.
-            SecretLeakError: fix contains hardcoded secrets.
-            NoCodeContextError: code_context was empty (would be a hallucination).
-            FixStillBrokenError: fix compiles but still misbehaves at runtime.
-            SyntaxFixExhaustedError: every retry produced uncompilable code.
-            RuntimeError: max retries exhausted for other reasons.
+            AllModelsFailed, FixTooLongError, SecretLeakError,
+            NoCodeContextError, FixStillBrokenError, SyntaxFixExhaustedError,
+            RuntimeError (max retries exhausted).
         """
         if self._nim is None:
             raise RuntimeError("No NIM client configured")
-
         if not code_context or not code_context.strip():
             logger.error(
                 "fix_generator_aborted build_id=%s reason=empty_code_context files=%s",
@@ -257,19 +111,22 @@ class FixGenerator:
             )
 
         config = AGENT_CONFIGS["code_repairer"]
-
         compressed_logs = compress_log(cleaned_logs, max_chars=config.max_input_tokens)
-        ratio = len(compressed_logs) / max(len(cleaned_logs), 1)
-        logger.info("log_compressed build_id=%s ratio=%.2f", analysis.build_id, ratio)
+        logger.info(
+            "log_compressed build_id=%s ratio=%.2f",
+            analysis.build_id,
+            len(compressed_logs) / max(len(cleaned_logs), 1),
+        )
 
         bug_count = count_bugs_in_logs(compressed_logs)
-        code_has_syntax_error = count_syntax_errors(code_context) > 0
-        complex_mode = bug_count >= COMPLEX_MODE_THRESHOLD or code_has_syntax_error
-
+        complex_mode = (
+            bug_count >= COMPLEX_MODE_THRESHOLD
+            or count_syntax_errors(code_context) > 0
+        )
         if complex_mode:
             logger.info(
-                "complex_mode_activated build_id=%s bugs=%d syntax_error=%s",
-                analysis.build_id, bug_count, code_has_syntax_error,
+                "complex_mode_activated build_id=%s bugs=%d",
+                analysis.build_id, bug_count,
             )
 
         past_fixes = fix_memory.query(
@@ -285,37 +142,35 @@ class FixGenerator:
 
         complexity = score_complexity(
             error_type=analysis.error_type.value,
-            blast_radius=analysis.blast_radius.value
-                         if hasattr(analysis.blast_radius, "value")
-                         else str(analysis.blast_radius),
+            blast_radius=(
+                analysis.blast_radius.value
+                if hasattr(analysis.blast_radius, "value")
+                else str(analysis.blast_radius)
+            ),
             affected_files=analysis.affected_files,
             root_cause=analysis.root_cause,
             log_snippet=compressed_logs,
         )
-        logger.info("task_complexity build_id=%s level=%s mode=%s",
-                    analysis.build_id, complexity.value,
-                    "complex" if complex_mode else "surgical")
+        logger.info(
+            "task_complexity build_id=%s level=%s mode=%s",
+            analysis.build_id, complexity.value,
+            "complex" if complex_mode else "surgical",
+        )
 
-        # Inject architecture layer guidance into the memory context block.
-        # The LLM sees this before the bug context so it can choose a fix
-        # strategy appropriate for the layer (frontend/backend/db/infra/tests).
         if arch_fix_hint:
-            arch_block = (
+            memory_ctx = (
                 f"\n=== ARCHITECTURE CONTEXT ===\n"
-                f"Layer: {arch_layer}\n"
-                f"Guidance: {arch_fix_hint}\n"
-            )
-            memory_ctx = arch_block + (memory_ctx or "")
+                f"Layer: {arch_layer}\nGuidance: {arch_fix_hint}\n"
+            ) + (memory_ctx or "")
 
-        prompt, system = self._build_prompt(
+        prompt, system = build_fix_prompt(
             complex_mode, analysis, compressed_logs, code_context, memory_ctx, bug_count,
         )
         messages = [
             {"role": "system", "content": system},
             {"role": "user",   "content": prompt},
         ]
-
-        attempt_budget = self._compute_attempt_budget(bug_count)
+        attempt_budget = compute_attempt_budget(bug_count)
         logger.info("retry_budget build_id=%s bugs=%d attempts=%d",
                     analysis.build_id, bug_count, attempt_budget)
 
@@ -324,62 +179,11 @@ class FixGenerator:
             analysis, code_context, bug_count,
         )
 
-    # --- Prompt + budget helpers --------------------------------------
+    # ------------------------------------------------------------------
+    # Retry loop
+    # ------------------------------------------------------------------
 
-    @staticmethod
-    def _build_prompt(
-        complex_mode: bool,
-        analysis: FailureAnalysis,
-        compressed_logs: str,
-        code_context: str,
-        memory_ctx: str,
-        bug_count: int,
-    ) -> tuple[str, str]:
-        """Pick the prompt template + system message for this run."""
-        memory_block = f"\n{memory_ctx}\n" if memory_ctx else ""
-        scan_block = BugPatternScanner.scan(code_context).to_prompt_block()
-        annotated_context = scan_block + code_context if scan_block else code_context
-        if complex_mode:
-            bug_list = extract_bug_list(compressed_logs)
-            prompt = COMPLEX_REPAIR_TEMPLATE.format(
-                error_type=analysis.error_type.value,
-                root_cause=analysis.root_cause,
-                affected_files=", ".join(analysis.affected_files),
-                cleaned_logs=compressed_logs,
-                code_context=annotated_context,
-                memory_context=memory_block,
-                bug_count=bug_count,
-                bug_list="\n".join(f"  - {b}" for b in bug_list)
-                         or "  - Multiple errors detected",
-            )
-            return prompt, COMPLEX_SYSTEM_PROMPT
-
-        prompt = SCENARIO_A_TEMPLATE.format(
-            error_type=analysis.error_type.value,
-            root_cause=analysis.root_cause,
-            affected_files=", ".join(analysis.affected_files),
-            cleaned_logs=compressed_logs,
-            code_context=annotated_context,
-            memory_context=memory_block,
-        )
-        return prompt, SYSTEM_PROMPT
-
-    @staticmethod
-    def _compute_attempt_budget(bug_count: int) -> int:
-        """Scale retries with bug density.
-
-        ≤2 bugs: 6 attempts.  3–9: MAX_RETRIES + 2.  10–40: MAX_RETRIES + 6.
-        High-bug files need room to converge; simple 1-bug fixes don't waste calls.
-        """
-        if bug_count >= 10:
-            return MAX_RETRIES + 6
-        if bug_count >= 3:
-            return MAX_RETRIES + 2
-        return 6
-
-    # --- Retry loop ---------------------------------------------------
-
-    def _retry_loop(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    def _retry_loop(
         self,
         messages: list[dict],
         original_user_prompt: str,
@@ -391,17 +195,38 @@ class FixGenerator:
     ) -> CodeFix:
         last_exc: Exception = RuntimeError("No attempts made")
         failed_attempts: list[dict] = []
+        budget_updated = False
+        attempt = -1
+        current_max_tokens: int | None = (
+            AGENT_CONFIGS["code_repairer"].max_tokens_per_request * 2
+            if complex_mode else None
+        )
 
-        for attempt in range(attempt_budget):
+        while True:
+            attempt += 1
+            if attempt >= attempt_budget:
+                break
             try:
-                response = self._nim.complete(messages)
+                response = self._nim.complete(messages, max_tokens=current_max_tokens)
                 parsed = parse_response(response)
 
-                fix_code, changed_lines = self._extract_fix_code(
+                if not budget_updated:
+                    budget_updated = True
+                    llm_bc = parsed.get("bug_count")
+                    if isinstance(llm_bc, int) and 1 <= llm_bc <= 50:
+                        new_budget = compute_attempt_budget(llm_bc)
+                        if new_budget > attempt_budget:
+                            attempt_budget = new_budget
+                            logger.info(
+                                "attempt_budget_updated build_id=%s new=%d bug_count=%d",
+                                analysis.build_id, attempt_budget, llm_bc,
+                            )
+
+                fix_code, changed_lines = extract_fix_code(
                     parsed, code_context, complex_mode, analysis,
                 )
 
-                # --- Syntax gate ---
+                # Syntax gate
                 syntax_ok, syntax_err = validate_fix_syntax(fix_code)
                 if not syntax_ok:
                     logger.warning("fix_syntax_invalid build_id=%s attempt=%d err=%s",
@@ -409,22 +234,13 @@ class FixGenerator:
                     if attempt < attempt_budget - 1:
                         failed_attempts.append({
                             "attempt": attempt, "kind": "syntax",
-                            "err": syntax_err[:1600],
-                            "fix_preview": fix_code[:1000],
+                            "err": syntax_err[:1600], "fix_preview": fix_code[:1000],
                         })
-                        # Two syntax errors in a row → surgical patches are
-                        # mangling structure. Switch to complex_mode so the LLM
-                        # rewrites the whole file instead of editing lines.
-                        syntax_fail_count = sum(
-                            1 for a in failed_attempts if a["kind"] == "syntax"
-                        )
-                        if syntax_fail_count >= 2 and not complex_mode:
+                        if (sum(1 for a in failed_attempts if a["kind"] == "syntax") >= 2
+                                and not complex_mode):
                             complex_mode = True
-                            logger.info(
-                                "complex_mode_escalated build_id=%s "
-                                "reason=repeated_syntax_errors",
-                                analysis.build_id,
-                            )
+                            logger.info("complex_mode_escalated build_id=%s "
+                                        "reason=repeated_syntax_errors", analysis.build_id)
                         messages[-1]["content"] = build_retry_prompt(
                             original_user_prompt, failed_attempts,
                         )
@@ -434,7 +250,7 @@ class FixGenerator:
                         f"attempts: {syntax_err}"
                     )
 
-                # --- Runtime gate ---
+                # Runtime gate
                 runtime_ok, runtime_err = validate_fix_runtime(fix_code)
                 if not runtime_ok:
                     logger.warning("fix_runtime_invalid build_id=%s attempt=%d err=%s",
@@ -442,8 +258,7 @@ class FixGenerator:
                     if attempt < attempt_budget - 1:
                         failed_attempts.append({
                             "attempt": attempt, "kind": "runtime",
-                            "err": runtime_err[:5000],
-                            "fix_preview": fix_code[:1000],
+                            "err": runtime_err[:5000], "fix_preview": fix_code[:1000],
                         })
                         messages[-1]["content"] = build_retry_prompt(
                             original_user_prompt, failed_attempts,
@@ -454,12 +269,10 @@ class FixGenerator:
                         f"{runtime_err}. Manual review required."
                     )
 
-                # --- Length gates ---
-                self._enforce_length_limits(
-                    fix_code, code_context, complex_mode, changed_lines,
-                )
+                # Length gate
+                enforce_length_limits(fix_code, code_context, complex_mode, changed_lines)
 
-                # --- Secret scan ---
+                # Secret scan
                 scan = scan_for_secrets(fix_code)
                 if scan.found:
                     logger.error("fix_secret_detected build_id=%s findings=%s",
@@ -474,7 +287,7 @@ class FixGenerator:
                         f"Generated fix contains hardcoded secrets: {scan.summary}"
                     )
 
-                # --- Quality gates ---
+                # Quality gates
                 bandit = run_bandit_scan(fix_code)
                 pylint = run_pylint_check(fix_code)
                 quality = evaluate_quality(bandit, pylint)
@@ -487,14 +300,12 @@ class FixGenerator:
 
                 base_confidence = float(parsed.get("confidence", 0.5))
                 adjusted_confidence = max(0.0, base_confidence + quality.confidence_modifier)
-
                 logger.info(
                     "fix_generated build_id=%s attempt=%d mode=%s bugs=%d "
                     "quality=%s conf=%.2f→%.2f",
                     analysis.build_id, attempt,
                     "complex" if complex_mode else "surgical",
-                    bug_count, quality.reason,
-                    base_confidence, adjusted_confidence,
+                    bug_count, quality.reason, base_confidence, adjusted_confidence,
                 )
 
                 if not bandit.ok and attempt < attempt_budget - 1:
@@ -506,129 +317,12 @@ class FixGenerator:
                                    analysis.build_id, attempt)
                     continue
 
+                bugs_found = resolve_bugs_found(parsed, fix_code, changed_lines, code_context)
                 llm_files = clean_files(parsed.get("files_to_modify", []))
                 final_files = analysis.affected_files or llm_files
                 if not final_files:
                     logger.warning("fix_has_no_valid_files build_id=%s llm_raw=%s",
                                    analysis.build_id, parsed.get("files_to_modify"))
-
-                bugs_found = parsed.get("bugs_found", [])
-                explanation_text = parsed.get("explanation", "")
-
-                # Tier 0: parse AUTO-HEAL comments from fix_code.
-                # LLM bugs_found is authoritative when meaningful; AUTO-HEAL provides
-                # the line map (changed_lines) and a fallback count when it is not.
-                if fix_code and not changed_lines:
-                    _autoheal_bugs: list[str] = []
-                    _autoheal_lines: dict[str, str] = {}
-                    _fn_scopes = _build_fn_scopes(fix_code)
-                    _last_seen: dict[tuple, int] = {}
-                    for lineno, line in enumerate(fix_code.splitlines(), 1):
-                        m = _AUTOHEAL_PATTERN.search(line)
-                        if not m:
-                            continue
-                        desc = m.group(1).strip()
-                        _autoheal_lines[str(lineno)] = line.rstrip()
-                        dedup_key = (_fn_scopes.get(lineno, "module"), _autoheal_key(desc))
-                        last_ln = _last_seen.get(dedup_key, -999)
-                        _last_seen[dedup_key] = lineno
-                        if lineno - last_ln <= _AUTOHEAL_PROXIMITY:
-                            continue
-                        if _is_style_change(desc):
-                            continue
-                        _autoheal_bugs.append(f"Line {lineno}: {desc[:160]}")
-
-                    if _autoheal_bugs:
-                        changed_lines = _autoheal_lines
-
-                        # Three-signal count resolution (highest → lowest trust):
-                        #  1. Phase 2 explanation count  – LLM's own stated diagnosis
-                        #  2. AUTO-HEAL proximity-dedup  – parses actual changed lines
-                        #  3. Raw bugs_found length       – least reliable (inflated/merged)
-                        phase2_n = _extract_phase2_count(explanation_text)
-                        autoheal_n = len(_autoheal_bugs)
-                        # Use Phase 2 count when available; fall back to AUTO-HEAL.
-                        target_n = phase2_n if phase2_n else autoheal_n
-
-                        if not _llm_bugs_meaningful(bugs_found):
-                            pool = _autoheal_bugs
-                        else:
-                            pool = bugs_found
-
-                        # Build final list: prefer pool descriptions, pad with
-                        # AUTO-HEAL entries when pool is short, trim when too long.
-                        if len(pool) >= target_n:
-                            bugs_found = pool[:target_n]
-                        else:
-                            extra = _autoheal_bugs[len(pool):target_n]
-                            bugs_found = pool + extra
-
-                # Tier 1 fallback: synthesize from changed_lines (surgical mode).
-                if not bugs_found and changed_lines:
-                    _fn_scopes_t1 = _build_fn_scopes(fix_code) if fix_code else {}
-                    _last_seen_t1: dict[tuple, int] = {}
-                    for lineno_str, new_code in sorted(
-                        changed_lines.items(),
-                        key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0,
-                    ):
-                        ln_int = int(lineno_str) if str(lineno_str).isdigit() else 0
-                        comment = (
-                            new_code.split("# AUTO-HEAL:", 1)[1].strip()
-                            if "# AUTO-HEAL:" in new_code
-                            else ""
-                        )
-                        dedup_key_t1 = (
-                            _fn_scopes_t1.get(ln_int, "module"),
-                            _autoheal_key(comment) if comment else f"line:{lineno_str}",
-                        )
-                        last_t1 = _last_seen_t1.get(dedup_key_t1, -999)
-                        _last_seen_t1[dedup_key_t1] = ln_int
-                        if ln_int - last_t1 <= _AUTOHEAL_PROXIMITY:
-                            continue
-                        if comment and _is_style_change(comment):
-                            continue
-                        if comment:
-                            bugs_found.append(f"Line {lineno_str}: {comment[:120]}")
-                        else:
-                            bugs_found.append(
-                                f"Line {lineno_str}: fixed → `{new_code.strip()[:80]}`"
-                            )
-
-                # Tier 2 fallback: static AST scanner on original code (full-rewrite mode).
-                # BugPatternScanner fails on files with syntax errors, so only use findings
-                # when it actually returns something.
-                if not bugs_found and code_context:
-                    scan_result = BugPatternScanner.scan(code_context)
-                    if scan_result.findings:
-                        bugs_found = [
-                            f"Line {f.line}: [{f.pattern}] {f.message} — {f.suggestion}"
-                            for f in scan_result.findings
-                        ]
-
-                # Tier 3 fallback: parse the explanation for Phase 2 bug list.
-                # LLM explanation always narrates bugs in "Phase 2: ..." section.
-                # Extract numbered items like "1. missing colon" or "Bug 1: ...".
-                if not bugs_found and explanation_text:
-                    import re as _re
-                    # Find numbered items: "1. ...", "1) ...", "Bug 1: ...", "- ..."
-                    items = _re.findall(
-                        r"(?:^|\n)\s*(?:\d+[\.\)]\s*|[-•]\s*|Bug\s+\d+:\s*)(.{10,120})",
-                        explanation_text,
-                    )
-                    if items:
-                        bugs_found = [item.strip() for item in items[:20]]
-                    else:
-                        # Last resort: extract "N bugs" count from explanation and make
-                        # generic entries so the PR shows a real number, not 0.
-                        count_m = _re.search(
-                            r"(\d+)\s+bugs?\b", explanation_text, _re.IGNORECASE
-                        )
-                        if count_m:
-                            n = int(count_m.group(1))
-                            bugs_found = [
-                                f"Bug {i}: identified in full rewrite — see explanation"
-                                for i in range(1, n + 1)
-                            ]
 
                 return CodeFix(
                     build_id=analysis.build_id,
@@ -645,63 +339,27 @@ class FixGenerator:
                     test_hints=parsed.get("test_hints", []),
                 )
 
+            except TruncatedResponseError as exc:
+                last_exc = exc
+                config = AGENT_CONFIGS["code_repairer"]
+                current_max_tokens = min(
+                    (current_max_tokens or config.max_tokens_per_request) * 2,
+                    16_000,
+                )
+                logger.warning(
+                    "fix_truncated build_id=%s attempt=%d — bumping tokens to %d",
+                    analysis.build_id, attempt, current_max_tokens,
+                )
             except (AllModelsFailed, FixTooLongError, SecretLeakError,
-                    NoCodeContextError, FixStillBrokenError,
-                    SyntaxFixExhaustedError):
+                    NoCodeContextError, FixStillBrokenError, SyntaxFixExhaustedError):
                 raise
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 last_exc = exc
                 logger.warning("fix_attempt_failed attempt=%d error=%s", attempt, exc)
 
-        raise RuntimeError(f"Max retries exhausted: {last_exc}") from last_exc
-
-    # --- Per-attempt sub-helpers --------------------------------------
-
-    @staticmethod
-    def _extract_fix_code(
-        parsed: dict,
-        code_context: str,
-        complex_mode: bool,
-        analysis: FailureAnalysis,
-    ) -> tuple[str, dict]:
-        """Pick fix source: surgical (changed_lines) or full rewrite (fix_code)."""
-        changed_lines = parsed.get("changed_lines", {})
-        if not complex_mode and changed_lines and code_context:
-            fix_code = apply_surgical_patch(code_context, changed_lines)
-            logger.info(
-                "surgical_patch_applied build_id=%s lines_changed=%d",
-                analysis.build_id, len(changed_lines),
-            )
-        elif "fix_code" in parsed and parsed["fix_code"]:
-            fix_code = parsed["fix_code"]
-        elif changed_lines and code_context:
-            # fallback: surgical even in complex mode if fix_code missing
-            fix_code = apply_surgical_patch(code_context, changed_lines)
-        else:
-            raise ValueError("LLM returned neither 'changed_lines' nor 'fix_code'")
-        return fix_code, changed_lines
-
-    @staticmethod
-    def _enforce_length_limits(
-        fix_code: str, code_context: str, complex_mode: bool, changed_lines: dict,
-    ) -> None:
-        """Reject fixes that exceed MAX_FIX_LINES or rewrite too much."""
-        total_lines = fix_code.count("\n")
-        max_lines = MAX_FIX_LINES_COMPLEX if complex_mode else MAX_FIX_LINES
-        if total_lines > max_lines:
-            raise FixTooLongError(
-                f"Fix has {total_lines} lines — exceeds {max_lines}"
-            )
-        # Over-rewrite guard only in surgical mode
-        if (not complex_mode and code_context
-                and code_context.count("\n") > 10 and not changed_lines):
-            original_lines = code_context.count("\n")
-            max_allowed_change = max(5, int(original_lines * 0.15))
-            if abs(total_lines - original_lines) > max_allowed_change:
-                raise FixTooLongError(
-                    f"Fix changed too much: {total_lines} vs {original_lines} original. "
-                    "Use 'changed_lines' for surgical fixes."
-                )
+        raise RuntimeError(
+            f"Max retries exhausted after {attempt_budget} attempts: {last_exc}"
+        ) from last_exc
 
 
 def make_fix_generator(env_prefix: str = "CODE_REPAIRER") -> FixGenerator:

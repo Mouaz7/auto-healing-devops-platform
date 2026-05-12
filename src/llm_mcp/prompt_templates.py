@@ -99,6 +99,7 @@ OUTPUT FORMAT (JSON ONLY — no prose outside the JSON)
   "explanation": "Pedagogical: phases 1-3 condensed. Emojis allowed.",
   "files_to_modify": ["path/to/file.py"],
   "estimated_blast_radius": "LOW|MEDIUM|HIGH",
+  "bug_count": 3,
   "bugs_found": ["bug 1 description", "bug 2 description", ...],
   "regression_risk": "Brief warning about potential side-effects (e.g. 'changes return type from float to int — callers may break')",
   "test_hints": ["Test edge case X", "Verify behavior with empty input", "Run existing test suite"]
@@ -107,9 +108,9 @@ OUTPUT FORMAT (JSON ONLY — no prose outside the JSON)
 BUGS_FOUND RULES (MANDATORY):
   - One entry per distinct LOGICAL bug from Phase 2. NOT one entry per changed line.
   - Variable renames (e.g. l→low, idx→i) are NOT bugs — do NOT add entries for them.
-  - The length of bugs_found MUST equal the bug count you stated in Phase 2.
-  - Wrong: 30 entries when you said "15 bugs" in Phase 2.
-  - Right:  15 entries — one per logical bug, no duplicates, no rename entries.
+  - bug_count MUST equal len(bugs_found) — both must reflect the same number of logical bugs.
+  - Wrong: bug_count=15 but 30 entries in bugs_found.
+  - Right:  bug_count=15 and exactly 15 entries — one per logical bug, no duplicates, no rename entries.
 
 ==============================================================================
 EXAMPLE A — single-line surgical fix (binary search self-assignment)
@@ -120,6 +121,7 @@ EXAMPLE A — single-line surgical fix (binary search self-assignment)
   "files_to_modify": ["tests/test_kram.py"],
   "confidence": 0.95,
   "estimated_blast_radius": "LOW",
+  "bug_count": 1,
   "bugs_found": ["line 14: self-assignment 'right = right' causes infinite loop — fixed to 'right = mid - 1'"],
   "regression_risk": "Low — only loop termination logic changed, function signature and return type unchanged.",
   "test_hints": ["Test with target at first/last position", "Test with target not in array (should return -1)", "Test with empty array"]
@@ -135,6 +137,7 @@ EXAMPLE B — multi-bug fix that needs full rewrite
   "files_to_modify": ["src/jobqueue.py"],
   "confidence": 0.92,
   "estimated_blast_radius": "LOW",
+  "bug_count": 7,
   "bugs_found": [
     "typo 'qeuue' → 'queue'",
     "missing colon on if-line",
@@ -325,15 +328,16 @@ OUTPUT FORMAT (JSON ONLY)
   "explanation": "Phases 1-3 condensed; emojis allowed.",
   "files_to_modify": ["path/to/file.py"],
   "estimated_blast_radius": "LOW|MEDIUM|HIGH",
+  "bug_count": 3,
   "bugs_found": ["bug 1 description", "bug 2 description", ...]
 }
 
 BUGS_FOUND RULES (MANDATORY):
   - One entry per distinct LOGICAL bug from Phase 2. NOT one entry per changed line.
   - Variable renames (e.g. l→low, idx→i) are NOT bugs — do NOT add entries for them.
-  - The length of bugs_found MUST equal the bug count you stated in Phase 2.
-  - Wrong: 30 entries when you said "15 bugs" in Phase 2.
-  - Right:  15 entries — one per logical bug, no duplicates, no rename entries.
+  - bug_count MUST equal len(bugs_found) — both must reflect the same number of logical bugs.
+  - Wrong: bug_count=15 but 30 entries in bugs_found.
+  - Right:  bug_count=15 and exactly 15 entries — one per logical bug, no duplicates, no rename entries.
 
 ==============================================================================
 EXAMPLE INPUT (multi-bug binary search)
@@ -360,6 +364,7 @@ EXAMPLE OUTPUT
   "explanation": "Phase 1: classic binary search, returns index or -1 if not found. Phase 2: 8 bugs — missing colon, typo 'rigth', off-by-one on len(arr), wrong operator '=<', wrong precedence on mid, assignment instead of equality, missing colons on elif/else, off-by-one on both branches, wrong return sentinel. Phase 3: bugs interact (multiple syntax errors prevent surgical patches), full rewrite chosen. Phase 4: re-implemented with correct operators, parenthesized mid calculation, both branches shrink range correctly, returns -1.",
   "files_to_modify": ["src/search.py"],
   "estimated_blast_radius": "LOW",
+  "bug_count": 9,
   "bugs_found": [
     "missing colon after function signature",
     "typo 'rigth' instead of 'right'",
@@ -398,10 +403,18 @@ DO:
   ✓ Fix the specific error (typo, wrong operator, missing colon, etc)
   ✓ Change ONLY the broken lines
   ✓ Keep everything else exactly as-is
-  ✓ Add an inline comment on every changed line:
+  ✓ Add an inline comment on every line you actually changed:
        # AUTO-HEAL: was '<old code>' (<bug type>) -> <what was fixed>
      Example:
-       right = mid - 1  # AUTO-HEAL: was 'right = right' (self-assignment) -> shrinks range"""
+       right = mid - 1  # AUTO-HEAL: was 'right = right' (self-assignment) -> shrinks range
+
+AUTO-HEAL COMMENT RULES (CRITICAL):
+  ✗ Do NOT add # AUTO-HEAL to lines you did not change
+  ✗ Do NOT add # AUTO-HEAL to new helper lines you inserted
+  ✗ Do NOT add # AUTO-HEAL without the 'was <old code>' reference
+  ✗ Do NOT add extra AUTO-HEAL comments on retry — only the real bug lines
+  ✓ Every AUTO-HEAL must describe what the original code was
+  ✓ The number of AUTO-HEAL comments MUST equal bug_count exactly"""
 
 COMPLEX_REPAIR_TEMPLATE = """\
 Error Analysis:
@@ -430,8 +443,18 @@ INSTRUCTIONS:
   ✓ Keep the same function names and purpose
   ✓ Return correct values (-1 for not found, etc.)
 
+  AUTO-HEAL COMMENT RULES (CRITICAL):
+  ✗ Do NOT add # AUTO-HEAL to lines you did not change
+  ✗ Do NOT add # AUTO-HEAL to new helper lines you inserted
+  ✗ Do NOT add # AUTO-HEAL without the 'was <old code>' reference
+  ✗ Do NOT add extra AUTO-HEAL comments on retry attempts — only annotate
+    lines that contain actual bugs from the original code
+  ✓ Every AUTO-HEAL must describe what the original code was
+  ✓ The number of AUTO-HEAL comments MUST equal bug_count exactly
+
   REQUIRED OUTPUT FIELDS:
   - fix_code: complete corrected file
+  - bug_count: exact number of bugs fixed (must equal len(bugs_found))
   - bugs_found: NON-EMPTY list — one string per bug fixed
     Example: ["missing colon after def", "arr[h+1] out-of-bounds → arr[h]", ...]
     CRITICAL: bugs_found MUST match the number of bugs you fixed.
