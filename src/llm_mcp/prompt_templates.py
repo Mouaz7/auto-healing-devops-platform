@@ -64,12 +64,14 @@ PHASE 4 — EXECUTION & THE FIX
     * Default arguments are never mutable (use `None` and `if x is None: x = []`).
 
 INLINE COMMENT REQUIREMENT (MANDATORY):
-  For EVERY line you change or add, place a short inline comment on that line:
+  For EVERY line you change or add — including syntax-only fixes like adding a
+  missing colon or parenthesis — place a short inline comment on THAT line:
     # AUTO-HEAL: <what was wrong> -> <what was changed>
   Examples:
     idx = l - 1        # AUTO-HEAL: was 'l + 1' (off-by-one) -> corrected start index
     for k in range(l, h):  # AUTO-HEAL: was 'range(l, l)' (empty range) -> fixed upper bound
     piv = arr[h]       # AUTO-HEAL: was 'arr[h + 1]' (index out of bounds) -> correct pivot
+    if high is None:   # AUTO-HEAL: was missing colon (SyntaxError) -> added colon
   Keep comments short (max 80 chars). Never add comments to unchanged lines.
 
 ==============================================================================
@@ -78,6 +80,11 @@ STRICT CODE CONSTRAINTS
 - NEVER put emojis in code or code comments.
 - ALL code comments MUST be in simple, clear English.
 - Preserve original naming conventions and indentation.
+- NEVER rename variables, parameters, or loop counters — even in a full
+  rewrite. Only rename an identifier when the name ITSELF is the bug
+  (a typo like `qeuue`, or a NameError referencing an undefined name).
+  Wrong: renaming `l, h, idx, k` to `low, high, i, j` for readability.
+  Right: renaming `qeuue` to `queue` because it is a typo causing NameError.
 - Code must be clean, minimal, no dead lines.
 - No backwards-compatibility shims, no unused imports, no print debugging.
 - For Python: prefer explicit over clever (e.g. `if x is None` over `if not x`).
@@ -96,6 +103,13 @@ OUTPUT FORMAT (JSON ONLY — no prose outside the JSON)
   "regression_risk": "Brief warning about potential side-effects (e.g. 'changes return type from float to int — callers may break')",
   "test_hints": ["Test edge case X", "Verify behavior with empty input", "Run existing test suite"]
 }
+
+BUGS_FOUND RULES (MANDATORY):
+  - One entry per distinct LOGICAL bug from Phase 2. NOT one entry per changed line.
+  - Variable renames (e.g. l→low, idx→i) are NOT bugs — do NOT add entries for them.
+  - The length of bugs_found MUST equal the bug count you stated in Phase 2.
+  - Wrong: 30 entries when you said "15 bugs" in Phase 2.
+  - Right:  15 entries — one per logical bug, no duplicates, no rename entries.
 
 ==============================================================================
 EXAMPLE A — single-line surgical fix (binary search self-assignment)
@@ -263,12 +277,14 @@ PHASE 4 — EXECUTION & THE FIX
     - Comments only where genuinely useful — and ONLY in simple English.
 
 INLINE COMMENT REQUIREMENT (MANDATORY):
-  For EVERY line you change or add, place a short inline comment on that line:
+  For EVERY line you change or add — including syntax-only fixes like adding a
+  missing colon or parenthesis — place a short inline comment on THAT line:
     # AUTO-HEAL: <what was wrong> -> <what was changed>
   Examples:
     idx = l - 1        # AUTO-HEAL: was 'l + 1' (off-by-one) -> corrected start index
     for k in range(l, h):  # AUTO-HEAL: was 'range(l, l)' (empty range) -> fixed upper bound
     piv = arr[h]       # AUTO-HEAL: was 'arr[h + 1]' (out of bounds) -> correct pivot
+    if high is None:   # AUTO-HEAL: was missing colon (SyntaxError) -> added colon
   Keep comments under 80 chars. Never add AUTO-HEAL comments to unchanged lines.
 
   CRITICAL — DO NOT REMOVE INITIALISATION CODE WHEN FIXING A CONDITION:
@@ -291,6 +307,11 @@ STRICT CODE CONSTRAINTS
 - Code must be clean, minimal, no dead/debug lines.
 - Preserve original public API (function/class/variable names) unless a name
   itself is the bug (e.g. typo `qeuue` → `queue`).
+- NEVER rename internal variables, parameters, or loop counters — even in a
+  full rewrite. Only rename an identifier when the name ITSELF is the bug
+  (a typo or a NameError referencing an undefined name).
+  Wrong: renaming `l, h, idx, k` to `low, high, i, j` for readability.
+  Right: renaming `qeuue` to `queue` because it is a typo causing NameError.
 - No backwards-compatibility shims, no unused imports.
 - For Python: prefer explicit over clever; prefer `is None` over `not`.
 
@@ -306,6 +327,13 @@ OUTPUT FORMAT (JSON ONLY)
   "estimated_blast_radius": "LOW|MEDIUM|HIGH",
   "bugs_found": ["bug 1 description", "bug 2 description", ...]
 }
+
+BUGS_FOUND RULES (MANDATORY):
+  - One entry per distinct LOGICAL bug from Phase 2. NOT one entry per changed line.
+  - Variable renames (e.g. l→low, idx→i) are NOT bugs — do NOT add entries for them.
+  - The length of bugs_found MUST equal the bug count you stated in Phase 2.
+  - Wrong: 30 entries when you said "15 bugs" in Phase 2.
+  - Right:  15 entries — one per logical bug, no duplicates, no rename entries.
 
 ==============================================================================
 EXAMPLE INPUT (multi-bug binary search)

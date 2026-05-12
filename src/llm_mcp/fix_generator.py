@@ -15,7 +15,9 @@ Helpers live in sibling modules to keep this file focused on the loop:
 """
 from __future__ import annotations
 
+import ast
 import logging
+import re
 
 from src.llm_mcp.bug_scanner import BugPatternScanner
 from src.llm_mcp.fix_parsers import apply_surgical_patch, parse_response
@@ -53,6 +55,81 @@ from src.shared.secret_scanner import scan_for_secrets
 from src.shared.task_complexity import score_complexity
 
 logger = logging.getLogger(__name__)
+
+_AUTOHEAL_PATTERN = re.compile(r"#\s*AUTO-HEAL:\s*(.+)")
+_AUTOHEAL_PROXIMITY = 4  # max lines between two fixes of the same logical bug
+
+_RE_WAS_SNIPPET = re.compile(r"was\s+'([^']+)'")
+_RE_WAS_CATEGORY = re.compile(r"was\s+[^(]*\(([^)]+)\)")
+_RE_HAS_WAS = re.compile(r"\bwas\b", re.IGNORECASE)
+# Prefixes that signal a style/rename change, not a bug fix
+_STYLE_PREFIXES = ("introduced", "renamed", "added for", "replaced for", "refactored")
+
+
+def _autoheal_key(desc: str) -> str:
+    """Deduplication key for an AUTO-HEAL description.
+
+    Determines whether two AUTO-HEAL comments in the same function represent
+    the same logical bug (e.g. both bounds of a binary-search fix).
+
+    Priority: was-expression → was-category → colon-phrase → first two words.
+    """
+    m = _RE_WAS_SNIPPET.search(desc)
+    if m:
+        return m.group(1).strip().lower()
+    m = _RE_WAS_CATEGORY.search(desc)
+    if m:
+        return m.group(1).lower().strip()
+    if ":" in desc:
+        return desc.split(":")[0].lower().strip()
+    words = desc.lower().split()
+    return " ".join(words[:2]) if len(words) >= 2 else (words[0] if words else desc)
+
+
+def _is_style_change(desc: str) -> bool:
+    """True when an AUTO-HEAL comment describes a rename/style change, not a bug.
+
+    Variable renames (e.g. `l` → `low`) produce comments like
+    "introduced proper index for Lomuto scheme" that have no 'was ...' clause.
+    Counting those as bugs inflates the bug count when the LLM rewrites variables.
+    """
+    if _RE_HAS_WAS.search(desc):
+        return False
+    lower = desc.lower().strip()
+    return any(lower.startswith(p) for p in _STYLE_PREFIXES)
+
+
+def _llm_bugs_meaningful(bugs: list) -> bool:
+    """True when the LLM returned a real, non-degenerate bugs_found list.
+
+    Falls through to AUTO-HEAL heuristics when the list is empty, all-identical
+    (LLM echoed the same error N times), or a single entry too short to be useful.
+    """
+    if not bugs:
+        return False
+    entries = {str(x).strip() for x in bugs}
+    if len(entries) == 1 and (len(bugs) > 1 or len(next(iter(entries))) < 15):
+        return False
+    return True
+
+
+def _build_fn_scopes(source: str) -> dict[int, str]:
+    """Map every line number in *source* to its enclosing function scope string.
+
+    Returns an empty dict on SyntaxError so callers degrade gracefully to
+    module-level (no-scope) deduplication.
+    """
+    scopes: dict[int, str] = {}
+    try:
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                end = getattr(node, "end_lineno", node.lineno)
+                scope = f"{node.name}:{node.lineno}"
+                for ln in range(node.lineno, end + 1):
+                    scopes[ln] = scope
+    except SyntaxError:
+        pass
+    return scopes
 
 
 # Inference params for the heavyweight coder models
@@ -418,87 +495,63 @@ class FixGenerator:
                 bugs_found = parsed.get("bugs_found", [])
                 explanation_text = parsed.get("explanation", "")
 
-                # Tier 0: always parse AUTO-HEAL comments from fix_code.
-                # These are the most accurate descriptions — the LLM writes them
-                # inline on every changed line. They replace generic LLM bugs_found
-                # (e.g. repeated "SyntaxError: expected ':'" messages) when present.
-                #
-                # Grouping: multiple AUTO-HEAL lines inside the same function are
-                # one logical bug (e.g. both sides of a binary-search off-by-one fix).
-                # We keep only the first entry per enclosing function so that the
-                # reported bug count matches the number of logical bugs, not changed lines.
+                # Tier 0: parse AUTO-HEAL comments from fix_code.
+                # LLM bugs_found is authoritative when meaningful; AUTO-HEAL provides
+                # the line map (changed_lines) and a fallback count when it is not.
                 if fix_code and not changed_lines:
-                    import ast as _ast0
-                    import re as _re0
-                    _autoheal_pattern = _re0.compile(r"#\s*AUTO-HEAL:\s*(.+)")
                     _autoheal_bugs: list[str] = []
                     _autoheal_lines: dict[str, str] = {}
-
-                    # Build line → enclosing-function-scope map from the fix code.
-                    _fn_scopes: dict[int, str] = {}
-                    try:
-                        _tree = _ast0.parse(fix_code)
-                        for _node in _ast0.walk(_tree):
-                            if isinstance(_node, (_ast0.FunctionDef, _ast0.AsyncFunctionDef)):
-                                _end = getattr(_node, "end_lineno", _node.lineno)
-                                for _ln in range(_node.lineno, _end + 1):
-                                    _fn_scopes[_ln] = f"{_node.name}:{_node.lineno}"
-                    except SyntaxError:
-                        pass  # fall back to per-line counting below
-
-                    _seen_scopes: set[str] = set()
+                    _fn_scopes = _build_fn_scopes(fix_code)
+                    _last_seen: dict[tuple, int] = {}
                     for lineno, line in enumerate(fix_code.splitlines(), 1):
-                        m = _autoheal_pattern.search(line)
+                        m = _AUTOHEAL_PATTERN.search(line)
                         if not m:
                             continue
                         desc = m.group(1).strip()
                         _autoheal_lines[str(lineno)] = line.rstrip()
-                        scope = _fn_scopes.get(lineno)
-                        if scope:
-                            if scope in _seen_scopes:
-                                # Same function already has a representative entry —
-                                # this line is part of the same logical bug; skip it.
-                                continue
-                            _seen_scopes.add(scope)
+                        dedup_key = (_fn_scopes.get(lineno, "module"), _autoheal_key(desc))
+                        last_ln = _last_seen.get(dedup_key, -999)
+                        _last_seen[dedup_key] = lineno
+                        if lineno - last_ln <= _AUTOHEAL_PROXIMITY:
+                            continue
+                        if _is_style_change(desc):
+                            continue
                         _autoheal_bugs.append(f"Line {lineno}: {desc[:160]}")
 
                     if _autoheal_bugs:
-                        # AUTO-HEAL descriptions are always preferred over generic
-                        # LLM bugs_found (e.g. repeated SyntaxError messages).
-                        bugs_found   = _autoheal_bugs
                         changed_lines = _autoheal_lines
+                        if not _llm_bugs_meaningful(bugs_found):
+                            bugs_found = _autoheal_bugs
+                        elif len(bugs_found) > len(_autoheal_bugs):
+                            # LLM inflated the list with per-line rename entries.
+                            # AUTO-HEAL proximity-dedup is more accurate; cap to its count
+                            # while keeping the LLM's richer descriptions.
+                            bugs_found = bugs_found[: len(_autoheal_bugs)]
 
                 # Tier 1 fallback: synthesize from changed_lines (surgical mode).
-                # Group lines that belong to the same function into one logical bug,
-                # matching the same deduplication logic used in Tier 0.
                 if not bugs_found and changed_lines:
-                    import ast as _ast1
-                    _fn_scopes_t1: dict[int, str] = {}
-                    if fix_code:
-                        try:
-                            _tree1 = _ast1.parse(fix_code)
-                            for _node1 in _ast1.walk(_tree1):
-                                if isinstance(_node1, (_ast1.FunctionDef, _ast1.AsyncFunctionDef)):
-                                    _end1 = getattr(_node1, "end_lineno", _node1.lineno)
-                                    for _ln1 in range(_node1.lineno, _end1 + 1):
-                                        _fn_scopes_t1[_ln1] = f"{_node1.name}:{_node1.lineno}"
-                        except SyntaxError:
-                            pass
-
-                    _seen_scopes_t1: set[str] = set()
+                    _fn_scopes_t1 = _build_fn_scopes(fix_code) if fix_code else {}
+                    _last_seen_t1: dict[tuple, int] = {}
                     for lineno_str, new_code in sorted(
                         changed_lines.items(),
                         key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0,
                     ):
                         ln_int = int(lineno_str) if str(lineno_str).isdigit() else 0
-                        scope_t1 = _fn_scopes_t1.get(ln_int)
-                        if scope_t1:
-                            if scope_t1 in _seen_scopes_t1:
-                                continue
-                            _seen_scopes_t1.add(scope_t1)
-                        comment = ""
-                        if "# AUTO-HEAL:" in new_code:
-                            comment = new_code.split("# AUTO-HEAL:", 1)[1].strip()
+                        comment = (
+                            new_code.split("# AUTO-HEAL:", 1)[1].strip()
+                            if "# AUTO-HEAL:" in new_code
+                            else ""
+                        )
+                        dedup_key_t1 = (
+                            _fn_scopes_t1.get(ln_int, "module"),
+                            _autoheal_key(comment) if comment else f"line:{lineno_str}",
+                        )
+                        last_t1 = _last_seen_t1.get(dedup_key_t1, -999)
+                        _last_seen_t1[dedup_key_t1] = ln_int
+                        if ln_int - last_t1 <= _AUTOHEAL_PROXIMITY:
+                            continue
+                        if comment and _is_style_change(comment):
+                            continue
                         if comment:
                             bugs_found.append(f"Line {lineno_str}: {comment[:120]}")
                         else:
