@@ -157,7 +157,7 @@ class PipelineStepsMixin:
                 f"{_config.SERVICE_URLS['knowledge_graph']}/tools/analyze_failure",
                 json={"build_id": build_id, "cleaned_logs": cleaned["cleaned_logs"]},
                 headers=headers,
-                timeout=60.0,
+                timeout=120.0,
             )
             resp.raise_for_status()
             analysis = resp.json()

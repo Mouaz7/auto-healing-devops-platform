@@ -4,7 +4,7 @@
 
 ### Automated Remediation in CI/CD: Design and Control of an AI-based Code Repair Agent
 
-[![Tests](https://img.shields.io/badge/tests-662%20passing-brightgreen?style=flat-square)](tests/)
+[![Tests](https://img.shields.io/badge/tests-667%20passing-brightgreen?style=flat-square)](tests/)
 [![HITL](https://img.shields.io/badge/HITL-enforced-critical?style=flat-square)](src/orchestrator_mcp/pipeline_finalise.py)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square)](https://python.org)
 [![License](https://img.shields.io/badge/thesis-PA2534%20BTH%202026-lightgrey?style=flat-square)](https://www.bth.se)
@@ -61,7 +61,7 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 | 5-stage log compression, ~90% token reduction before LLM | `src/log_cleaner_mcp/pipeline.py` |
 | Regex + LLM fallback error analysis for 11 error types, blast radius | `src/knowledge_graph_mcp/failure_analyser.py` |
 | Fix generation: retry loop 6–14 attempts, surgical patch or full rewrite | `src/llm_mcp/fix_generator.py` |
-| Proactive AST bug scanner: 63 patterns injected into prompt before LLM sees traceback | `src/llm_mcp/bug_scanner.py` |
+| Proactive AST bug scanner: 83 patterns + regex fallback layer injected into prompt before LLM sees traceback | `src/llm_mcp/bug_scanner.py` |
 | 11 runtime error hints in retry prompts: TypeError, IndexError, KeyError, RecursionError, AttributeError, NameError, ValueError, ZeroDivisionError, SyntaxError, IndentationError, AssertionError | `src/llm_mcp/fix_prompts.py` |
 | Stuck-loop pivot: identical error type twice → strategy change in prompt | `src/llm_mcp/fix_prompts.py:45` |
 | 4-model fallback chain per agent, complexity-based model routing | `src/shared/nim_client.py`, `src/shared/task_complexity.py` |
@@ -91,7 +91,7 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 | AI introduces security vulnerabilities | Bandit scan → retry or block | `src/shared/quality_gates.py` |
 | AI produces low-quality code | Pylint real score → confidence penalty | `src/shared/quality_gates.py` |
 | AI hallucinates wrong fixes | AST parse + sandboxed subprocess run + 11 runtime hints in retry prompt before accepting | `src/llm_mcp/fix_validators.py`, `src/llm_mcp/fix_prompts.py` |
-| AI targets symptom not root cause | 63-pattern static scanner pre-annotates code with bug locations before LLM call | `src/llm_mcp/bug_scanner.py` |
+| AI targets symptom not root cause | 83-pattern dual-layer scanner (AST + regex) pre-annotates code with bug locations before LLM call | `src/llm_mcp/bug_scanner.py` |
 | AI cannot be trusted to merge | **Auto-merge disabled** — human clicks Merge on GitHub | `src/orchestrator_mcp/github_mixin.py` |
 | No accountability or traceability | Audit trail + PR body with confidence, root cause, elapsed time | `src/shared/audit_log.py` |
 | System loops infinitely | Regression block + CI guard prevent infinite repair cycles | `src/orchestrator_mcp/pipeline_steps.py` |
@@ -146,7 +146,8 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
                             ▼
    ┌─────────────────────────────────────────────────────────┐
    │ Agent 5 — Code Repairer     (llm-mcp           :8086)   │
-   │ 63-pattern bug scanner → LLM → AUTO-HEAL annotations    │
+   │ 83-pattern dual-layer scanner (AST+regex) → LLM →       │
+   │ AUTO-HEAL annotations · Bandit + Pylint + secret scan   │
    │ Bandit + Pylint + secret scanner · 6–14 retry attempts  │
    └────────────────────────┬────────────────────────────────┘
                             ▼
@@ -245,9 +246,10 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 | Aspect | Details |
 |---|---|
 | Code | `src/llm_mcp/fix_generator.py` (`FixGenerator`) |
-| Pre-LLM | 63-pattern AST scanner (`bug_scanner.py`) annotates code with bug locations injected into the prompt |
-| Strategy | Surgical patch (small fix) OR full rewrite (multi-bug) — chosen by complexity score |
-| Retry budget | 6 attempts (≤2 bugs) · 8 (3–9) · 14 (10–40) — scales with bug density |
+| Pre-LLM | 83-pattern dual-layer scanner (AST + regex) annotates code with bug locations; full-file scanning mode triggered when 2+ patterns detected |
+| Strategy | Surgical patch (small fix) OR full rewrite (multi-bug) — chosen by complexity score. **Complex mode auto-triggered** when: 10+ total bugs, 2+ AST patterns detected, or syntax errors present. Prompts explicitly instruct: "Fix reported error AND scan ENTIRE file for additional bugs" |
+| Bug counting | Dual-layer: log-based count (from traceback) + AST scanner count (logic bugs); effective count = max of both → scales retry budget |
+| Retry budget | 6 attempts (≤2 bugs) · 8 (3–9) · 14 (10–40) — scales with bug density, dynamically updated when LLM reports bug_count |
 | Quality gates | Bandit (HIGH severity blocks) · Pylint (low score reduces confidence) · secret scanner (11 patterns) |
 | AUTO-HEAL annotations | Every changed line gets `# AUTO-HEAL: was '...' (bug type) -> fix` inline |
 | Output | `CodeFix(fix_patch, confidence, explanation, bugs_found, model_used, regression_risk, test_hints)` |
@@ -687,9 +689,13 @@ The retry counter is stored per fix record. After the 60-minute window expires, 
 
 ## 10. Proactive Bug Scanner (Agent 5)
 
-### 63-Pattern AST Scanner (`src/llm_mcp/bug_scanner.py`)
+### 83-Pattern Dual-Layer Scanner (`src/llm_mcp/bug_scanner.py`)
 
-Before the LLM generates a fix, the pipeline runs a full static AST scan on the original broken code. Findings are **injected into the fix prompt** so the model knows exactly what to look for — instead of tunnel-visioning on the traceback symptom line.
+Before the LLM generates a fix, the pipeline runs a dual-layer scan on the original broken code:
+1. **AST layer** (83 patterns) — detects logic bugs, operator errors, semantic issues invisible to syntax checkers
+2. **Regex layer** — catches textual anti-patterns like `+= 0`, `1 +` in discount logic, quantity+price combinations
+
+Findings are **injected into the fix prompt** so the model knows exactly what to look for — instead of tunnel-visioning on the traceback symptom line. When 2+ patterns are detected, the system automatically escalates to **full-file repair mode** for comprehensive fixing.
 
 ```
 ============================================================
@@ -704,19 +710,38 @@ STATIC BUG SCAN — 3 PATTERN(S) DETECTED
 ============================================================
 ```
 
-#### Pattern categories (63 total)
+#### Pattern categories (83 total)
 
-| Category | Patterns |
-|---|---|
-| **Accumulation bugs** | wrong_accumulator_init, loop_overwrites_accumulator, augmented_subtract_in_sum, wrong_product_sentinel |
-| **Edge-case returns** | wrong_edge_return, wrong_return_sentinel, inconsistent_return, missing_return |
-| **Loop bugs** | off_by_one_range, loop_var_unused, range_excludes_last_element, range_wrong_direction, return_first_iteration, import_in_loop, infinite_while_no_break, while_condition_unchanged |
-| **Comparison bugs** | comparison_as_assignment, is_literal_comparison, none_equality_check, redundant_bool_comparison, comparison_with_itself, type_not_isinstance, float_exact_equality, len_compared_to_zero |
-| **Class / OOP bugs** | class_mutable_attribute, missing_super_init, forgot_self_dot, mutable_default_arg, callable_default_arg, recursive_mutable_default, dict_fromkeys_mutable_default, list_multiply_shared_refs |
-| **Exception bugs** | bare_except, exception_swallowed, wrong_exception_reraise, return_in_finally, raise_in_finally, assert_for_validation, assert_tuple |
-| **String / collection** | str_method_not_assigned, sorted_result_discarded, sort_returns_none, print_returns_none, extend_with_string, append_list_literal, join_non_string_elements, sum_of_lists, duplicate_dict_key, star_import |
-| **Math / type bugs** | floor_div_float_context, divide_without_guard, wrong_arithmetic_op, truediv_as_index, slice_wrong_direction, windows_path_escape |
-| **Code quality** | shadow_builtin, augmented_assign_to_param, recursive_call_not_returned, fstring_no_interpolation, or_default_loses_falsy, unreachable_code_after_return |
+| Category | Patterns | Count |
+|---|---|---|
+| **Accumulation bugs** | wrong_accumulator_init, loop_overwrites_accumulator, augmented_subtract_in_sum, wrong_product_sentinel, augassign_noop_zero, augassign_noop_mult_one, subscript_add_not_mult, augassign_wrong_op_in_add_fn, subscript_add_in_accumulator | 9 |
+| **Edge-case returns** | wrong_edge_return, wrong_return_sentinel, inconsistent_return, missing_return, wrong_return_type_bool_fn | 5 |
+| **Loop bugs** | off_by_one_range, loop_var_unused, range_excludes_last_element, range_wrong_direction, return_first_iteration, import_in_loop, infinite_while_no_break, while_condition_unchanged, string_concat_in_loop, inplace_op_on_immutable | 10 |
+| **Comparison bugs** | comparison_as_assignment, is_literal_comparison, none_equality_check, redundant_bool_comparison, comparison_with_itself, type_not_isinstance, float_exact_equality, len_compared_to_zero, chained_comparison_impossible, wrong_threshold_operator | 10 |
+| **Class / OOP bugs** | class_mutable_attribute, missing_super_init, forgot_self_dot, mutable_default_arg, callable_default_arg, recursive_mutable_default, dict_fromkeys_mutable_default, list_multiply_shared_refs | 8 |
+| **Exception bugs** | bare_except, exception_swallowed, wrong_exception_reraise, return_in_finally, raise_in_finally, assert_for_validation, assert_tuple | 7 |
+| **String / collection** | str_method_not_assigned, sorted_result_discarded, sort_returns_none, print_returns_none, extend_with_string, append_list_literal, join_non_string_elements, sum_of_lists, duplicate_dict_key, star_import, dict_get_mutable_default, dict_key_type_mismatch | 12 |
+| **Math / type bugs** | floor_div_float_context, divide_without_guard, wrong_arithmetic_op, truediv_as_index, slice_wrong_direction, windows_path_escape, division_plus_offset, discount_sign_wrong, negative_index_pivot, transfer_both_directions_subtract, symmetric_subtract | 11 |
+| **Code quality** | shadow_builtin, augmented_assign_to_param, recursive_call_not_returned, fstring_no_interpolation, or_default_loses_falsy, unreachable_code_after_return, open_without_context_manager, recursive_no_base_case | 8 |
+| **Regex layer** | Text pattern scanning (anti-patterns in source) | 3 |
+
+#### Dual-Mode Fix Strategy
+
+The system uses **two complementary fix modes** depending on bug complexity:
+
+| Mode | Triggered when | Strategy |
+|---|---|---|
+| **Surgical** | ≤2 bugs, no AST patterns | Minimal single-error fix: "Change line X from Y to Z" |
+| **Complex** | 10+ bugs OR 2+ AST patterns detected OR syntax errors | Full-file review: "Find and fix every bug across the entire file" · merged bug list from logs + scanner · higher retry budget |
+
+**Bug list construction:** When complex mode is active, the prompt receives:
+- Log-derived bugs (from traceback text)
+- AST-detected bugs (logic errors, operator issues, semantic problems)
+- Deduplicated by first 60 characters to avoid redundancy
+- Explicit instruction to scan line by line
+
+Example prompt instruction:
+> *"You found these bugs — fix all of them AND scan the entire file for additional bugs:\n - Line 4: `qty += item["price"]` (should be `*`)\n - Line 12: `(1 + rate/100)` (should be `1 - rate/100`)\n ... Perform a full file review."*
 
 ---
 
@@ -836,6 +861,25 @@ This makes it immediately clear **what was wrong on which line** and **exactly w
 ---
 
 ## 14. Slack Integration
+
+### ⏱️ 5-Minute Health Check — Progress Visibility
+
+When a build arrives, the system sends two Slack notifications to keep the user informed:
+
+| When | Message | Purpose |
+|---|---|---|
+| **0 seconds** | "⚙️ Auto-heal Started" | Confirms the system received the build and is working |
+| **5 minutes** | "⏱️ 5-Minute Health Check" | Confirms the pipeline is still running; no silent waits |
+| **Completion** | 🟢/🟡/🔴 Result | Final fix proposal or failure reason |
+
+**Why 5 minutes?** Complex builds take 5–20 minutes. Without the check message, users see nothing and assume the system hung. The 5-minute message says *"we're still here and making progress."*
+
+**Implementation** (`src/shared/health_check.py`):
+- `track_build_start()` — record when a build arrives
+- `schedule_health_check()` — async task that waits 5 min, then sends Block Kit message
+- Includes build ID, repo, elapsed time, and reassuring status text
+
+---
 
 ### GREEN & YELLOW — Detailed Review Message (HITL Enforced)
 
@@ -1012,7 +1056,7 @@ Every morning at 08:00 UTC: builds processed, success rates, top error types, tr
 
 ## 15. Test Suite
 
-**662 unit tests passing** · 23 traffic-light tests need updating (still test the deprecated blast-radius score formula — the new logic uses files + bugs/file + AI confidence, see Section 5)
+**667 unit tests passing** · 23 traffic-light tests need updating (still test the deprecated blast-radius score formula — the new logic uses files + bugs/file + AI confidence, see Section 5)
 
 <details>
 <summary>Unit test coverage (click to expand)</summary>
@@ -1021,11 +1065,12 @@ Every morning at 08:00 UTC: builds processed, success rates, top error types, tr
 |---|---|
 | Fix Memory | record, query, Jaccard similarity, approval stamps |
 | Adaptive Thresholds | calibration algorithm, safe bounds, cache |
+| Health Check | 5-min tracking, scheduled messages, cleanup, Slack integration |
 | Heal Verifier | regression detection, file overlap, expiry |
 | Secret Scanner | all 11 patterns, safe-pattern exclusions |
 | Quality Gates | Bandit scan, real Pylint score, confidence modifiers |
 | Fix Helpers | NoneType hint, 14 runtime error hints, fingerprint, strategy pivot, emergency rewrite |
-| Bug Scanner | 63 AST patterns: accumulator init, mutable class attr, assert-tuple, shared list multiply, etc. |
+| Bug Scanner | 83-pattern dual-layer (AST + regex): accumulator init, mutable class attr, assert-tuple, shared list multiply, no-op operations, discount sign errors, transfer direction bugs, recursion base-case, etc. |
 | Circuit Breaker | CLOSED → OPEN → HALF_OPEN → CLOSED |
 | Model Fallback | chain, AllModelsFailed, slot reset |
 | Workflow Engine | state transitions, InvalidTransitionError, pruning |

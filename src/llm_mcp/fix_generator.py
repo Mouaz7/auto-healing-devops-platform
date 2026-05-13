@@ -118,15 +118,24 @@ class FixGenerator:
             len(compressed_logs) / max(len(cleaned_logs), 1),
         )
 
-        bug_count = count_bugs_in_logs(compressed_logs)
+        from src.llm_mcp.bug_scanner import BugPatternScanner  # avoid circular at module level
+        log_bug_count = count_bugs_in_logs(compressed_logs)
+        # AST scanner finds logic bugs that never appear in build logs (wrong
+        # operators, off-by-one, etc.). Use whichever count is higher so the
+        # retry budget and complex_mode decision reflect the full picture.
+        scanner_count = len(BugPatternScanner.scan(code_context).findings)
+        bug_count = max(log_bug_count, scanner_count)
+        bug_count = max(bug_count, scanner_count)
+
         complex_mode = (
             bug_count >= COMPLEX_MODE_THRESHOLD
+            or scanner_count >= 2
             or count_syntax_errors(code_context) > 0
         )
         if complex_mode:
             logger.info(
-                "complex_mode_activated build_id=%s bugs=%d",
-                analysis.build_id, bug_count,
+                "complex_mode_activated build_id=%s log_bugs=%d scanner_bugs=%d effective=%d",
+                analysis.build_id, log_bug_count, scanner_count, bug_count,
             )
 
         past_fixes = fix_memory.query(

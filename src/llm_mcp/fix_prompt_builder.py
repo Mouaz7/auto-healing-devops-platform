@@ -31,16 +31,45 @@ def build_fix_prompt(
     """Return (user_prompt, system_prompt) for this fix attempt.
 
     Annotates code_context with BugPatternScanner findings before inserting
-    it into the prompt so the LLM has static-analysis hints alongside the code.
-    Chooses between the surgical (SCENARIO_A) and full-rewrite (COMPLEX_REPAIR)
-    templates based on *complex_mode*.
+    it into the prompt. Scanner findings also force complex_mode when 2+
+    patterns are detected — ensuring the LLM does a full file repair even
+    when the build log only contains one error (e.g. a SyntaxError that hid
+    all the underlying logic bugs).
     """
     memory_block = f"\n{memory_ctx}\n" if memory_ctx else ""
-    scan_block = BugPatternScanner.scan(code_context).to_prompt_block()
+    scan_result = BugPatternScanner.scan(code_context)
+    scan_block = scan_result.to_prompt_block()
     annotated_context = scan_block + code_context if scan_block else code_context
 
+    # Elevate to complex mode when scanner finds 2+ patterns so the LLM is
+    # asked for a full file repair rather than a minimal single-error fix.
+    scanner_bug_count = len(scan_result.findings)
+    if scanner_bug_count >= 2:
+        complex_mode = True
+
+    # Effective bug count is max of log-derived count and scanner count so the
+    # retry budget scales correctly even when logs only show one error type.
+    effective_bug_count = max(bug_count, scanner_bug_count)
+
     if complex_mode:
-        bug_list = extract_bug_list(compressed_logs)
+        log_bugs = extract_bug_list(compressed_logs)
+        scanner_bugs = [
+            f"Line {f.line}: {f.pattern} — {f.message}"
+            + (f" Fix: {f.suggestion}" if f.suggestion else "")
+            for f in scan_result.findings
+        ]
+        # Merge log bugs + scanner bugs, deduplicate by content
+        seen: set[str] = set()
+        merged_bugs: list[str] = []
+        for b in log_bugs + scanner_bugs:
+            key = b[:60]
+            if key not in seen:
+                seen.add(key)
+                merged_bugs.append(b)
+        bug_list_str = (
+            "\n".join(f"  - {b}" for b in merged_bugs)
+            or "  - Multiple errors detected — perform full file review"
+        )
         prompt = COMPLEX_REPAIR_TEMPLATE.format(
             error_type=analysis.error_type.value,
             root_cause=analysis.root_cause,
@@ -48,9 +77,8 @@ def build_fix_prompt(
             cleaned_logs=compressed_logs,
             code_context=annotated_context,
             memory_context=memory_block,
-            bug_count=bug_count,
-            bug_list="\n".join(f"  - {b}" for b in bug_list)
-                     or "  - Multiple errors detected",
+            bug_count=effective_bug_count,
+            bug_list=bug_list_str,
         )
         return prompt, COMPLEX_SYSTEM_PROMPT
 

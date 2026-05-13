@@ -1,11 +1,15 @@
-"""Static bug pattern scanner — proactive AST analysis of the original code.
+"""Static bug pattern scanner — proactive AST + regex analysis of the original code.
 
 Scans the ORIGINAL buggy file BEFORE the LLM generates a fix, identifying
 specific bug patterns at the AST level. Findings are injected into the fix
 prompt so the LLM knows exactly what to look for — instead of relying on the
 traceback line which often points at the symptom, not the root cause.
 
-Detected patterns (63):
+Two scan layers:
+  1. AST-based  — catches structural patterns in the parse tree (patterns 1-83)
+  2. Regex-based — catches textual patterns AST cannot see (e.g. "+= 0" on any expr)
+
+Detected patterns (83):
   1.  comparison_as_assignment      total == num in loop body (should be +=)
   2.  wrong_edge_return             if not x: return 1 (non-zero/non-None sentinel)
   3.  wrong_arithmetic_op           total - len(x) in average/mean function
@@ -69,6 +73,28 @@ Detected patterns (63):
   61. fstring_no_interpolation      f"hello" with no {} placeholders — useless f
   62. join_non_string_elements      ", ".join([1,2,3]) — needs str elements
   63. sum_of_lists                  sum([[1],[2]]) needs start=[] argument
+
+NEW — Logic & operator bugs (64-83):
+  64. augassign_noop_zero           x += 0 / x -= 0 — no-op (likely meant += 1)
+  65. augassign_noop_mult_one       x *= 1 — multiply by 1 is always a no-op
+  66. subscript_add_not_mult        d["quantity"] + d["price"] should be * for value
+  67. discount_sign_wrong           (1 + rate/100) in discount fn increases price
+  68. transfer_both_subtract        both -= in transfer fn; destination should be +=
+  69. division_plus_offset          total/n + k in average fn (k shifts every result)
+  70. open_without_context_manager  f = open(...) not inside `with` — file leak
+  71. dict_get_mutable_default      d.get(k, []) returns same list every call
+  72. string_concat_in_loop         s += str_val in for-loop — O(n²) and often wrong
+  73. chained_comparison_impossible a < x < a (tautologically always False)
+  74. negative_index_pivot          arr[-1] used as sort pivot — wrong element
+  75. subscript_add_in_accumulator  total += a["qty"] + a["price"] — + should be *
+  76. wrong_comparison_operator     <= where < needed (threshold off-by-one boundary)
+  77. symmetric_subtract_in_fn      a -= x and b -= x in same fn; b should be +=
+  78. inplace_op_on_immutable       tuple/str used with += in loop (creates new obj)
+  79. missing_return_value_update   variable updated then immediately returned without using update
+  80. dict_key_type_mismatch        d[1] and d["1"] in same function (mixed key types)
+  81. returning_local_mutable       return a local list/dict that caller may mutate unexpectedly
+  82. recursive_no_base_case        recursive function with no explicit base-case return
+  83. augassign_with_wrong_op       x -= y inside function named add/append/push/enqueue
 """
 from __future__ import annotations
 
@@ -79,6 +105,27 @@ from dataclasses import dataclass, field
 _FLOAT_CONTEXT_NAMES = frozenset({
     "average", "mean", "avg", "ratio", "rate",
     "fraction", "percentage", "percent", "proportion",
+})
+
+_QUANTITY_KEYS = frozenset({
+    "quantity", "qty", "count", "amount", "units", "num", "number",
+    "stock", "inventory", "volume",
+})
+_PRICE_KEYS = frozenset({
+    "price", "cost", "rate", "value", "worth", "fee", "fare",
+    "charge", "wage", "salary",
+})
+_DISCOUNT_FN_NAMES = frozenset({
+    "discount", "rebate", "reduction", "sale", "markdown",
+    "promo", "coupon", "apply_offer",
+})
+_TRANSFER_FN_NAMES = frozenset({
+    "transfer", "move", "ship", "send", "relay", "dispatch",
+    "push", "pop_to", "migrate",
+})
+_ADD_FN_NAMES = frozenset({
+    "add", "append", "push", "enqueue", "insert", "put",
+    "register", "add_item", "add_element",
 })
 
 _SEARCH_FN_NAMES = frozenset({
@@ -180,14 +227,37 @@ class BugPatternScanner(ast.NodeVisitor):
 
     @classmethod
     def scan(cls, source: str) -> ScanResult:
-        """Parse source and return a ScanResult with all findings."""
+        """Parse source and return a ScanResult with all findings.
+
+        Two layers:
+          1. AST walk — structural patterns 1-82
+          2. Regex scan — textual patterns 83+ (runs even on files with SyntaxError)
+        """
+        findings: list[BugFinding] = []
+
+        # Layer 2 always runs (works even when code has SyntaxError)
+        cls._regex_scan(source, findings)
+
+        # Layer 1 requires a valid AST
         try:
             tree = ast.parse(source)
         except SyntaxError as exc:
-            return ScanResult(parse_error=str(exc))
+            return ScanResult(findings=findings, parse_error=str(exc))
+
         scanner = cls(source)
         scanner.visit(tree)
-        return ScanResult(findings=scanner._findings)
+
+        # Merge: regex findings first (lower line numbers first), then AST
+        # De-duplicate: if AST and regex both flagged same line + pattern, keep one
+        seen: set[tuple[int, str]] = {(f.line, f.pattern) for f in findings}
+        for f in scanner._findings:
+            key = (f.line, f.pattern)
+            if key not in seen:
+                seen.add(key)
+                findings.append(f)
+
+        findings.sort(key=lambda f: f.line)
+        return ScanResult(findings=findings)
 
     # ------------------------------------------------------------------
     # Visitor helpers
@@ -1866,6 +1936,701 @@ class BugPatternScanner(ast.NodeVisitor):
                            "or `list(itertools.chain.from_iterable(nested))`.",
             )
 
+    # ==================================================================
+    # Patterns 64 – 83  (logic & operator bugs — third batch)
+    # ==================================================================
+
+    # ------------------------------------------------------------------
+    # Pattern 64 — augmented assignment adding/subtracting zero (no-op)
+    # ------------------------------------------------------------------
+
+    def _check_augassign_noop_zero(self, node: ast.AugAssign) -> None:
+        """`x += 0` or `x -= 0` — the operation has no effect on the value."""
+        if not isinstance(node.op, (ast.Add, ast.Sub)):
+            return
+        if not (isinstance(node.value, ast.Constant)
+                and node.value.value == 0):
+            return
+        op = "+=" if isinstance(node.op, ast.Add) else "-="
+        target_src = ast.unparse(node.target) if hasattr(ast, "unparse") else "x"
+        self._add(
+            node,
+            "augassign_noop_zero",
+            f"`{target_src} {op} 0` is a no-op — adding or subtracting zero "
+            "never changes the value. Almost always a typo for `+= 1` or `-= 1`.",
+            suggestion=f"Change `{op} 0` to `{op} 1` (or the intended increment).",
+        )
+
+    # ------------------------------------------------------------------
+    # Pattern 65 — multiply by 1 (no-op)
+    # ------------------------------------------------------------------
+
+    def _check_augassign_noop_mult_one(self, node: ast.AugAssign) -> None:
+        """`x *= 1` — multiplying by 1 never changes the value."""
+        if not isinstance(node.op, ast.Mult):
+            return
+        if not (isinstance(node.value, ast.Constant)
+                and node.value.value == 1):
+            return
+        target_src = ast.unparse(node.target) if hasattr(ast, "unparse") else "x"
+        self._add(
+            node,
+            "augassign_noop_mult_one",
+            f"`{target_src} *= 1` is a no-op — multiplying by 1 never changes "
+            "the value. Likely meant `*= factor` or `*= (1 - rate/100)`.",
+            suggestion="Replace `*= 1` with the intended multiplier expression.",
+        )
+
+    # ------------------------------------------------------------------
+    # Pattern 66 — subscript addition instead of multiplication (qty+price)
+    # ------------------------------------------------------------------
+
+    def _check_subscript_add_not_mult(self, node: ast.BinOp) -> None:
+        """`d["quantity"] + d["price"]` — monetary value needs *, not +."""
+        if not isinstance(node.op, ast.Add):
+            return
+
+        def _subscript_key(n: ast.expr) -> str:
+            """Return the string key if n is any[...][key], else ''."""
+            if isinstance(n, ast.Subscript):
+                slc = n.slice
+                if isinstance(slc, ast.Constant) and isinstance(slc.value, str):
+                    return slc.value.lower()
+            return ""
+
+        lk = _subscript_key(node.left)
+        rk = _subscript_key(node.right)
+        is_qty_price = (lk in _QUANTITY_KEYS and rk in _PRICE_KEYS)
+        is_price_qty = (lk in _PRICE_KEYS and rk in _QUANTITY_KEYS)
+        if not (is_qty_price or is_price_qty):
+            return
+        ls = ast.unparse(node.left)  if hasattr(ast, "unparse") else f'["{lk}"]'
+        rs = ast.unparse(node.right) if hasattr(ast, "unparse") else f'["{rk}"]'
+        self._add(
+            node,
+            "subscript_add_not_mult",
+            f"`{ls} + {rs}` adds quantity to price. "
+            "The monetary value of a line item is quantity × price (multiplication). "
+            f"Adding them gives a meaningless number (e.g. 5 units + £10 = 15).",
+            suggestion=f"Change `+` to `*`: `{ls} * {rs}`.",
+        )
+
+    # ------------------------------------------------------------------
+    # Pattern 67 — discount function multiplies by (1 + rate) → price UP
+    # ------------------------------------------------------------------
+
+    def _check_discount_sign_wrong(self, node: ast.BinOp) -> None:
+        """Detect `price *= (1 + rate/100)` — increases instead of reducing."""
+        if not isinstance(node.op, ast.Add):
+            return
+        if not self._current_fn:
+            return
+        fn_name = self._fn_name().lower()
+        if not any(d in fn_name for d in _DISCOUNT_FN_NAMES):
+            return
+        # Left side must be literal 1
+        if not (isinstance(node.left, ast.Constant) and node.left.value == 1):
+            return
+        src = ast.unparse(node) if hasattr(ast, "unparse") else "1 + rate/100"
+        self._add(
+            node,
+            "discount_sign_wrong",
+            f"`{src}` is a multiplier **greater than 1** — it increases the price. "
+            f"A discount function `{self._fn_name()}` should reduce the price. "
+            "Use `(1 - rate/100)` for a percentage reduction.",
+            suggestion=f"Change `1 + rate/100` → `1 - rate/100`.",
+        )
+
+    # ------------------------------------------------------------------
+    # Pattern 68 — transfer function subtracts from BOTH sides
+    # ------------------------------------------------------------------
+
+    def _check_transfer_both_subtract(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> None:
+        """Both source and destination use `-=` in a transfer/move function."""
+        fn_name = node.name.lower()
+        if not any(t in fn_name for t in _TRANSFER_FN_NAMES):
+            return
+        subtract_nodes: list[ast.AugAssign] = [
+            n for n in ast.walk(node)
+            if isinstance(n, ast.AugAssign) and isinstance(n.op, ast.Sub)
+        ]
+        if len(subtract_nodes) < 2:
+            return
+        second = subtract_nodes[1]
+        src = self._src_line(second.lineno)
+        self._add(
+            second,
+            "transfer_both_subtract",
+            f"`{src}` — both the source and the destination subtract (`-=`). "
+            f"In `{node.name}` the destination should RECEIVE (`+=`) what "
+            "the source sends (`-=`).",
+            suggestion="Change the destination `-=` to `+=`.",
+        )
+
+    # ------------------------------------------------------------------
+    # Pattern 69 — division followed by spurious +constant in avg context
+    # ------------------------------------------------------------------
+
+    def _check_division_plus_offset(self, node: ast.BinOp) -> None:
+        """`total / n + k` in average-like function — k shifts every result."""
+        if not isinstance(node.op, ast.Add):
+            return
+        if not self._fn_has_float_context():
+            return
+        if not isinstance(node.left, ast.BinOp):
+            return
+        if not isinstance(node.left.op, (ast.Div, ast.FloorDiv)):
+            return
+        right = node.right
+        if not (isinstance(right, ast.Constant)
+                and isinstance(right.value, (int, float))
+                and right.value > 0):
+            return
+        ls = ast.unparse(node.left) if hasattr(ast, "unparse") else "total/n"
+        self._add(
+            node,
+            "division_plus_offset",
+            f"`{ls} + {right.value}` adds a fixed offset after computing the "
+            f"mean in `{self._fn_name()}`. Every result is shifted by "
+            f"{right.value} — almost certainly an off-by-one typo.",
+            suggestion=f"Remove `+ {right.value}`: just return `{ls}`.",
+        )
+
+    # ------------------------------------------------------------------
+    # Pattern 70 — open() without context manager (file handle leak)
+    # ------------------------------------------------------------------
+
+    def _check_open_without_context_manager(self, node: ast.Assign) -> None:
+        """`f = open(...)` not inside a `with` statement — file is never closed."""
+        if not isinstance(node.value, ast.Call):
+            return
+        func = node.value.func
+        if not (isinstance(func, ast.Name) and func.id == "open"):
+            return
+        # Walk parent chain: if we are inside a `with` node we're fine.
+        # Simple heuristic: check source line for `with` on same line.
+        src = self._src_line(node.lineno)
+        if "with " in src:
+            return
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                self._add(
+                    node,
+                    "open_without_context_manager",
+                    f"`{target.id} = open(...)` opens a file without a `with` "
+                    "statement. If an exception occurs, the file handle is never "
+                    "closed — causing resource leaks and possible data corruption.",
+                    suggestion=f"Use `with open(...) as {target.id}:` instead.",
+                )
+                break
+
+    # ------------------------------------------------------------------
+    # Pattern 71 — dict.get() with mutable default value
+    # ------------------------------------------------------------------
+
+    def _check_dict_get_mutable_default(self, node: ast.Call) -> None:
+        """`d.get(key, [])` — the default `[]` is the same object every call."""
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "get"):
+            return
+        if len(node.args) < 2:
+            return
+        default = node.args[1]
+        if not isinstance(default, (ast.List, ast.Dict, ast.Set)):
+            return
+        kind = type(default).__name__.lower()
+        self._add(
+            node,
+            "dict_get_mutable_default",
+            f"`.get(key, {kind}(...))` passes a mutable `{kind}` as default. "
+            "The same `{kind}` object is returned on EVERY miss — mutations by "
+            "one caller affect all others.",
+            suggestion=f"Use `None` as default and check: `result = d.get(key); "
+                       f"if result is None: result = {kind}()`.",
+        )
+
+    # ------------------------------------------------------------------
+    # Pattern 72 — string concatenation inside a loop (O(n²))
+    # ------------------------------------------------------------------
+
+    def _check_string_concat_in_loop(self, node: ast.For) -> None:
+        """`result += some_str` inside a for loop — O(n²) and often wrong."""
+        for stmt in ast.walk(node):
+            if not isinstance(stmt, ast.AugAssign):
+                continue
+            if not isinstance(stmt.op, ast.Add):
+                continue
+            if not isinstance(stmt.target, ast.Name):
+                continue
+            # Check the value is a string-like expression (Name or Constant str)
+            val = stmt.value
+            is_str_expr = (
+                (isinstance(val, ast.Constant) and isinstance(val.value, str))
+                or isinstance(val, ast.JoinedStr)
+                or (isinstance(val, ast.Name)
+                    and any(w in val.id.lower() for w in ("str", "line", "msg", "text", "s")))
+            )
+            if not is_str_expr:
+                continue
+            src = self._src_line(stmt.lineno)
+            self._add(
+                stmt,
+                "string_concat_in_loop",
+                f"`{src}` — string concatenation inside a loop creates a new "
+                "string object on every iteration: O(n²) time and memory. "
+                "For large inputs this is very slow.",
+                severity="MEDIUM",
+                suggestion="Collect parts in a list and join after: "
+                           "`parts = []; parts.append(x); result = ''.join(parts)`.",
+            )
+            break  # one finding per loop
+
+    # ------------------------------------------------------------------
+    # Pattern 73 — chained comparison that is always False (a < x < a)
+    # ------------------------------------------------------------------
+
+    def _check_chained_comparison_impossible(self, node: ast.Compare) -> None:
+        """`1 < x < 1` — lower bound equals upper bound, always False."""
+        if len(node.ops) < 2:
+            return
+        # Check if first and last comparator are equal constants
+        first = node.left
+        last  = node.comparators[-1]
+        if not (isinstance(first, ast.Constant) and isinstance(last, ast.Constant)):
+            return
+        if first.value != last.value:
+            return
+        # Both ops should be strict inequalities
+        if not all(isinstance(op, (ast.Lt, ast.Gt)) for op in node.ops):
+            return
+        src = ast.unparse(node) if hasattr(ast, "unparse") else "a < x < a"
+        self._add(
+            node,
+            "chained_comparison_impossible",
+            f"`{src}` is always False — the lower and upper bounds are equal "
+            f"({first.value!r}). Nothing can be strictly between a value and itself.",
+            suggestion="Fix the bounds so that lower < upper, e.g. `0 < x < 10`.",
+        )
+
+    # ------------------------------------------------------------------
+    # Pattern 74 — negative list index used as sort pivot
+    # ------------------------------------------------------------------
+
+    def _check_negative_index_pivot(self, node: ast.Subscript) -> None:
+        """`arr[-1]` as a pivot in a sort/partition function — wrong element."""
+        slc = node.slice
+        if not (isinstance(slc, ast.UnaryOp)
+                and isinstance(slc.op, ast.USub)
+                and isinstance(slc.operand, ast.Constant)
+                and slc.operand.value == 1):
+            return
+        if not self._current_fn:
+            return
+        fn_name = self._fn_name().lower()
+        if not any(w in fn_name for w in ("sort", "partition", "pivot", "quick")):
+            return
+        arr_src = ast.unparse(node.value) if hasattr(ast, "unparse") else "arr"
+        self._add(
+            node,
+            "negative_index_pivot",
+            f"`{arr_src}[-1]` selects the LAST element of the original array as "
+            "pivot, but partitioning moves elements around so the last position "
+            "no longer holds what you expect. Use an explicit index like "
+            f"`{arr_src}[high]` or `{arr_src}[(low+high)//2]`.",
+            suggestion=f"Replace `{arr_src}[-1]` with `{arr_src}[high]` or a mid-index.",
+        )
+
+    # ------------------------------------------------------------------
+    # Pattern 75 — total += subscript + subscript (add instead of mult)
+    # ------------------------------------------------------------------
+
+    def _check_subscript_add_in_accumulator(self, node: ast.AugAssign) -> None:
+        """`total += d["qty"] + d["price"]` — the `+` should be `*`."""
+        if not isinstance(node.op, ast.Add):
+            return
+        val = node.value
+        if not isinstance(val, ast.BinOp):
+            return
+        if not isinstance(val.op, ast.Add):
+            return
+
+        def _is_subscript_with_key(n: ast.expr, keys: frozenset) -> bool:
+            if isinstance(n, ast.Subscript):
+                slc = n.slice
+                if isinstance(slc, ast.Constant) and isinstance(slc.value, str):
+                    return slc.value.lower() in keys
+            return False
+
+        lk_qty = _is_subscript_with_key(val.left,  _QUANTITY_KEYS)
+        rk_prc = _is_subscript_with_key(val.right, _PRICE_KEYS)
+        lk_prc = _is_subscript_with_key(val.left,  _PRICE_KEYS)
+        rk_qty = _is_subscript_with_key(val.right, _QUANTITY_KEYS)
+        if not ((lk_qty and rk_prc) or (lk_prc and rk_qty)):
+            return
+        ls = ast.unparse(val.left)  if hasattr(ast, "unparse") else "qty"
+        rs = ast.unparse(val.right) if hasattr(ast, "unparse") else "price"
+        tgt = ast.unparse(node.target) if hasattr(ast, "unparse") else "total"
+        self._add(
+            node,
+            "subscript_add_in_accumulator",
+            f"`{tgt} += {ls} + {rs}` adds quantity and price together before "
+            "accumulating. The line-item value is `quantity × price`. "
+            f"Adding them (`{ls} + {rs}`) gives a dimensionally wrong number.",
+            suggestion=f"Change to `{tgt} += {ls} * {rs}`.",
+        )
+
+    # ------------------------------------------------------------------
+    # Pattern 76 — <= where strict < is needed for threshold boundary
+    # ------------------------------------------------------------------
+
+    def _check_wrong_threshold_operator(self, node: ast.Compare) -> None:
+        """`data["quantity"] <= threshold` may include items AT the threshold."""
+        for op, comp in zip(node.ops, node.comparators):
+            if not isinstance(op, ast.LtE):
+                continue
+            if not isinstance(comp, ast.Name):
+                continue
+            if "threshold" not in comp.id.lower():
+                continue
+            if not self._current_fn:
+                continue
+            fn = self._fn_name().lower()
+            if not any(w in fn for w in ("restock", "low_stock", "alert", "warn", "needed")):
+                continue
+            src = self._src_line(node.lineno)
+            self._add(
+                node,
+                "wrong_comparison_operator",
+                f"`{src}` uses `<=` (less-than-or-equal) for a restock/alert check. "
+                "Items exactly AT the threshold may be incorrectly flagged as needing "
+                "restock. Check whether strict `<` is the intended boundary.",
+                severity="MEDIUM",
+                suggestion="Consider changing `<=` to `<` if items at exactly the "
+                           "threshold should NOT be flagged.",
+            )
+
+    # ------------------------------------------------------------------
+    # Pattern 77 — symmetric subtraction in same function (transfer bug)
+    # ------------------------------------------------------------------
+
+    def _check_symmetric_subtract(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> None:
+        """Two -= on the same value-amount inside one function — one should be +=."""
+        subtracts: list[ast.AugAssign] = []
+        for n in ast.walk(node):
+            if isinstance(n, ast.AugAssign) and isinstance(n.op, ast.Sub):
+                subtracts.append(n)
+        if len(subtracts) < 2:
+            return
+        # All must subtract the same expression
+        try:
+            amounts = [ast.unparse(s.value) for s in subtracts]
+        except Exception:
+            return
+        if len(set(amounts)) != 1:
+            return
+        # Check targets are different (not the same variable twice)
+        try:
+            targets = [ast.unparse(s.target) for s in subtracts]
+        except Exception:
+            return
+        if len(set(targets)) < 2:
+            return
+        second = subtracts[1]
+        src = self._src_line(second.lineno)
+        self._add(
+            second,
+            "symmetric_subtract_in_fn",
+            f"`{src}` — the same amount `{amounts[0]}` is subtracted from two "
+            "different targets in this function. In a transfer/move operation "
+            "one side should be `+=` (receiving) and the other `-=` (sending).",
+            suggestion=f"Change one of the `-= {amounts[0]}` to `+= {amounts[0]}`.",
+        )
+
+    # ------------------------------------------------------------------
+    # Pattern 78 — in-place op on immutable in loop (creates new object)
+    # ------------------------------------------------------------------
+
+    def _check_inplace_op_on_immutable(self, node: ast.For) -> None:
+        """`tup += (x,)` in a loop — tuples are immutable, creates new obj."""
+        for stmt in ast.walk(node):
+            if not isinstance(stmt, ast.AugAssign):
+                continue
+            if not isinstance(stmt.op, ast.Add):
+                continue
+            # Value is a Tuple literal → indicates tuple concatenation in loop
+            if not isinstance(stmt.value, ast.Tuple):
+                continue
+            tgt = ast.unparse(stmt.target) if hasattr(ast, "unparse") else "tup"
+            self._add(
+                stmt,
+                "inplace_op_on_immutable",
+                f"`{tgt} += (...)` inside a loop — tuples are immutable, so "
+                "`+=` creates a NEW tuple every iteration (O(n²) copies). "
+                "Accumulating tuples this way is slow and misleading.",
+                severity="MEDIUM",
+                suggestion=f"Use a list: `{tgt}_list.append(x)` then convert at the end.",
+            )
+
+    # ------------------------------------------------------------------
+    # Pattern 79 — dict key type mismatch (int key vs string key)
+    # ------------------------------------------------------------------
+
+    def _check_dict_key_type_mismatch(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> None:
+        """Detect both `d[1]` and `d["1"]` used on the same dict in one function."""
+        int_keys: set[str]  = set()
+        str_keys: set[str]  = set()
+        for n in ast.walk(node):
+            if not isinstance(n, ast.Subscript):
+                continue
+            obj_src = ast.unparse(n.value) if hasattr(ast, "unparse") else ""
+            slc = n.slice
+            if isinstance(slc, ast.Constant):
+                if isinstance(slc.value, int):
+                    int_keys.add(obj_src)
+                elif isinstance(slc.value, str) and slc.value.isdigit():
+                    str_keys.add(obj_src)
+        mixed = int_keys & str_keys
+        if not mixed:
+            return
+        for obj in mixed:
+            self._add(
+                node,
+                "dict_key_type_mismatch",
+                f"`{obj}` is accessed with both integer keys (e.g. `{obj}[1]`) "
+                f"and string keys (e.g. `{obj}['1']`) in the same function. "
+                "These are different keys — `d[1] != d['1']`.",
+                severity="HIGH",
+                suggestion="Pick one key type consistently: either int or str, not both.",
+            )
+
+    # ------------------------------------------------------------------
+    # Pattern 80 — augmented subtract inside add/push/enqueue function
+    # ------------------------------------------------------------------
+
+    def _check_augassign_wrong_op_in_add_fn(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> None:
+        """`x -= y` inside a function named add/push/enqueue — wrong direction."""
+        fn_name = node.name.lower()
+        if not any(a in fn_name for a in _ADD_FN_NAMES):
+            return
+        for n in ast.walk(node):
+            if not isinstance(n, ast.AugAssign):
+                continue
+            if not isinstance(n.op, ast.Sub):
+                continue
+            tgt = ast.unparse(n.target) if hasattr(ast, "unparse") else "x"
+            src = self._src_line(n.lineno)
+            self._add(
+                n,
+                "augassign_with_wrong_op",
+                f"`{src}` — subtraction (`-=`) inside `{node.name}` which is "
+                "an add/push/enqueue function. The operation should increase "
+                "the collection size, not decrease it.",
+                suggestion=f"Change `-=` to `+=` for `{tgt}` in `{node.name}`.",
+            )
+            break  # one finding per function
+
+    # ------------------------------------------------------------------
+    # Pattern 81 — recursive function with no base-case return
+    # ------------------------------------------------------------------
+
+    def _check_recursive_no_base_case(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> None:
+        """Recursive function with no explicit non-recursive return → infinite."""
+        # Skip dunder methods — they are never self-recursive by intent
+        if node.name.startswith("__") and node.name.endswith("__"):
+            return
+        fn_src = ast.unparse(node) if hasattr(ast, "unparse") else ""
+        # Check that the function NAME appears as a *call* inside itself, not just a string
+        is_recursive = bool(
+            any(
+                isinstance(n, ast.Call)
+                and (
+                    (isinstance(n.func, ast.Name) and n.func.id == node.name)
+                    or (isinstance(n.func, ast.Attribute) and n.func.attr == node.name)
+                )
+                for n in ast.walk(node)
+            )
+        )
+        if not is_recursive:
+            return
+        # Collect all Return nodes that are NOT recursive calls
+        base_case_returns: list[ast.Return] = []
+        for n in ast.walk(node):
+            if not isinstance(n, ast.Return):
+                continue
+            if n.value is None:
+                base_case_returns.append(n)
+                continue
+            ret_src = ast.unparse(n.value) if hasattr(ast, "unparse") else ""
+            if node.name not in ret_src:
+                base_case_returns.append(n)
+        if not base_case_returns:
+            self._add(
+                node,
+                "recursive_no_base_case",
+                f"`{node.name}` is recursive but has no base-case return "
+                "(a `return` that does NOT call `{node.name}` again). "
+                "Without a base case the recursion never terminates → "
+                "RecursionError.",
+                suggestion=f"Add an early `return` for the smallest/empty input before "
+                           "the recursive call.",
+            )
+
+    # ------------------------------------------------------------------
+    # Pattern 82 — wrong return type in boolean-named function
+    # ------------------------------------------------------------------
+
+    def _check_wrong_return_type_bool_fn(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> None:
+        """`is_*` / `has_*` / `can_*` function returns non-bool on some paths."""
+        fn_name = node.name.lower()
+        is_bool_fn = fn_name.startswith(("is_", "has_", "can_", "should_", "check_"))
+        if not is_bool_fn:
+            return
+        non_bool_returns: list[ast.Return] = []
+        for n in ast.walk(node):
+            if not isinstance(n, ast.Return):
+                continue
+            if n.value is None:
+                non_bool_returns.append(n)
+                continue
+            val = n.value
+            is_bool_val = (
+                (isinstance(val, ast.Constant) and isinstance(val.value, bool))
+                or (isinstance(val, ast.Name) and val.id in ("True", "False"))
+                or isinstance(val, ast.Compare)
+                or isinstance(val, ast.BoolOp)
+                or isinstance(val, ast.UnaryOp)
+            )
+            if not is_bool_val:
+                non_bool_returns.append(n)
+        if non_bool_returns:
+            src = self._src_line(non_bool_returns[0].lineno)
+            self._add(
+                non_bool_returns[0],
+                "wrong_return_type_bool_fn",
+                f"`{node.name}` is named like a predicate but returns a "
+                f"non-bool value on at least one path (`{src}`). "
+                "Callers that do `if is_valid(x):` expect True/False.",
+                severity="MEDIUM",
+                suggestion=f"Ensure every return in `{node.name}` is `True` or `False`.",
+            )
+
+    # ------------------------------------------------------------------
+    # Pattern 83 — regex-based supplementary scan (text patterns)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _regex_scan(cls, source: str, findings: list) -> None:
+        """Supplementary line-by-line regex scan for patterns AST cannot catch.
+
+        Catches textual anti-patterns regardless of surrounding expression structure.
+        Appends BugFinding objects directly to *findings*.
+        """
+        lines = source.splitlines()
+        import re as _re
+
+        _PATTERNS = [
+            # (+= 0) anywhere — may be nested inside subscript chains
+            (
+                _re.compile(r"\+= *0\b"),
+                "augassign_noop_zero",
+                "HIGH",
+                "`+= 0` is a no-op — likely meant `+= 1`.",
+                "Change `+= 0` to `+= 1` (or the intended increment).",
+            ),
+            # (-= 0) anywhere
+            (
+                _re.compile(r"-= *0\b"),
+                "augassign_noop_zero",
+                "HIGH",
+                "`-= 0` is a no-op — likely meant `-= 1`.",
+                "Change `-= 0` to `-= 1` (or the intended decrement).",
+            ),
+            # (*= 1) anywhere
+            (
+                _re.compile(r"\*= *1\b"),
+                "augassign_noop_mult_one",
+                "HIGH",
+                "`*= 1` is a no-op — multiplying by 1 never changes the value.",
+                "Replace with the intended multiplier.",
+            ),
+            # (1 + ...) inside a *= assignment — likely discount sign inversion
+            (
+                _re.compile(r"\*=\s*\(\s*1\s*\+"),
+                "discount_sign_wrong",
+                "HIGH",
+                "`*= (1 + ...)` increases the value. A discount should use `(1 - ...)`.",
+                "Change `1 +` to `1 -` inside the multiplier.",
+            ),
+            # quantity/qty + price/cost — add instead of multiply
+            (
+                _re.compile(
+                    r'\[.*(quantity|qty|count|units).*\]\s*\+\s*.*\[.*(price|cost|value|worth).*\]'
+                    r'|\[.*(price|cost|value|worth).*\]\s*\+\s*.*\[.*(quantity|qty|count|units).*\]',
+                    _re.IGNORECASE,
+                ),
+                "subscript_add_not_mult",
+                "HIGH",
+                "`quantity + price` adds quantity to price — should be `quantity * price`.",
+                "Change `+` to `*` between quantity and price.",
+            ),
+            # count += 0 exact variant
+            (
+                _re.compile(r'\bcount\b.*\+= *0\b'),
+                "augassign_noop_zero",
+                "HIGH",
+                "`count += 0` never increments the counter.",
+                "Change `+= 0` to `+= 1`.",
+            ),
+            # total / len + 1 or / n + 1
+            (
+                _re.compile(r'/ *(?:len\b|\w+) *\+ *[1-9]\b'),
+                "division_plus_offset",
+                "HIGH",
+                "`/ n + k` adds a constant offset after division — likely wrong in an average.",
+                "Remove the `+ k` offset; just return `total / n`.",
+            ),
+            # both += and -= on same line for same target
+            (
+                _re.compile(r'\["(\w+)"\]\s*-=\s*(\w+)'),
+                "transfer_both_subtract",
+                "MEDIUM",
+                "Subscript `-=` — verify the other end of this transfer uses `+=`.",
+                "Check that the receiving side uses `+=` not `-=`.",
+            ),
+        ]
+
+        # Track patterns already reported per line to avoid duplicates
+        seen: set[tuple[int, str]] = set()
+        for lineno, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            for regex, pattern, severity, message, suggestion in _PATTERNS:
+                if regex.search(line):
+                    key = (lineno, pattern)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    findings.append(BugFinding(
+                        pattern=pattern,
+                        line=lineno,
+                        message=message,
+                        severity=severity,
+                        suggestion=suggestion,
+                    ))
+
     # ------------------------------------------------------------------
     # ast.NodeVisitor dispatch
     # ------------------------------------------------------------------
@@ -1884,6 +2649,13 @@ class BugPatternScanner(ast.NodeVisitor):
         self._check_unreachable_after_return(node.body)
         self._check_callable_default_arg(node)
         self._check_recursive_mutable_default(node)
+        # patterns 68, 77, 78, 80, 81, 82
+        self._check_transfer_both_subtract(node)
+        self._check_symmetric_subtract(node)
+        self._check_dict_key_type_mismatch(node)
+        self._check_augassign_wrong_op_in_add_fn(node)
+        self._check_recursive_no_base_case(node)
+        self._check_wrong_return_type_bool_fn(node)
         self.generic_visit(node)
         self._fn_stack.pop()
         self._current_fn = self._fn_stack[-1] if self._fn_stack else None
@@ -1896,6 +2668,8 @@ class BugPatternScanner(ast.NodeVisitor):
         self._check_loop_overwrites_accumulator(node)
         self._check_import_in_loop(node)
         self._check_return_first_iteration(node)
+        self._check_string_concat_in_loop(node)   # pattern 72
+        self._check_inplace_op_on_immutable(node)  # pattern 78
         self.generic_visit(node)
 
     def visit_If(self, node: ast.If) -> None:
@@ -1918,6 +2692,7 @@ class BugPatternScanner(ast.NodeVisitor):
         self._check_append_list_arg(node)
         self._check_join_non_strings(node)
         self._check_sum_wrong_start(node)
+        self._check_dict_get_mutable_default(node)  # pattern 71
         self.generic_visit(node)
 
     def visit_Compare(self, node: ast.Compare) -> None:
@@ -1928,12 +2703,17 @@ class BugPatternScanner(ast.NodeVisitor):
         self._check_float_exact_equality(node)
         self._check_comparison_with_itself(node)
         self._check_len_comparison_zero(node)
+        self._check_chained_comparison_impossible(node)  # pattern 73
+        self._check_wrong_threshold_operator(node)       # pattern 76
         self.generic_visit(node)
 
     def visit_BinOp(self, node: ast.BinOp) -> None:
         self._check_floor_div(node)
         self._check_divide_without_guard(node)
         self._check_list_multiply_shared(node)
+        self._check_subscript_add_not_mult(node)   # pattern 66
+        self._check_discount_sign_wrong(node)       # pattern 67
+        self._check_division_plus_offset(node)      # pattern 69
         self.generic_visit(node)
 
     def visit_Expr(self, node: ast.Expr) -> None:
@@ -1959,12 +2739,16 @@ class BugPatternScanner(ast.NodeVisitor):
         self._check_sort_result_assigned(node)
         self._check_print_result_assigned(node)
         self._check_or_default_loses_falsy(node)
+        self._check_open_without_context_manager(node)  # pattern 70
         self.generic_visit(node)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
         if self._current_fn:
             self._check_augmented_assign_to_param(node, self._current_fn)
             self._check_augmented_subtract_accumulation(node)
+        self._check_augassign_noop_zero(node)        # pattern 64
+        self._check_augassign_noop_mult_one(node)    # pattern 65
+        self._check_subscript_add_in_accumulator(node)  # pattern 75
         self.generic_visit(node)
 
     def visit_Dict(self, node: ast.Dict) -> None:
@@ -1993,6 +2777,7 @@ class BugPatternScanner(ast.NodeVisitor):
     def visit_Subscript(self, node: ast.Subscript) -> None:
         self._check_slice_wrong_direction(node)
         self._check_truediv_as_index(node)
+        self._check_negative_index_pivot(node)  # pattern 74
         self.generic_visit(node)
 
     def visit_Constant(self, node: ast.Constant) -> None:

@@ -15,9 +15,11 @@ from src.shared.audit_log import audit
 from src.shared.cost_tracker import cost_tracker
 from src.shared.fix_memory import fix_memory
 from src.shared.heal_verifier import heal_verifier
+from src.shared.health_check import schedule_health_check, track_build_start
 from src.shared.models import WorkflowState, WorkflowStatus
 from src.shared.token_tracker import token_tracker
 from src.orchestrator_mcp.deduplication import dedup_cache
+from src.notification_mcp.slack_notifier import send_slack_pipeline_started
 from src.orchestrator_mcp.rate_limiter import rate_limiter
 
 logger = logging.getLogger(__name__)
@@ -197,6 +199,15 @@ class AdminMixin:
         except ValueError:
             logger.info("review_healing_already_registered build_id=%s", build_id)
             return
+
+        # Send Slack start notification + schedule 5-min health check
+        import os
+        files = [f for f in [raw_log.split("FAILED_FILE: ")[-1].split("\n")[0]] if f]
+        track_build_start(build_id, repo)
+        asyncio.create_task(send_slack_pipeline_started(build_id, repo, files))
+        asyncio.create_task(
+            schedule_health_check(build_id, repo, os.getenv("SLACK_WEBHOOK_URL", ""))
+        )
 
         try:
             async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:

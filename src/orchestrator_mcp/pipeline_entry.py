@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import traceback
 import uuid
 
@@ -10,6 +11,7 @@ import httpx
 from aiohttp import web
 
 from src.shared.audit_log import audit
+from src.shared.health_check import schedule_health_check, track_build_start
 from src.shared.models import WorkflowState, WorkflowStatus
 from src.shared.resilience import handle_agent_failure, trigger_global_fallback
 from src.notification_mcp.slack_notifier import send_slack_pipeline_started
@@ -87,8 +89,15 @@ class PipelineEntryMixin:
         if data.get("sync") is True:
             return await self._run_pipeline_sync(build_id, raw_log, repo, correlation_id)
 
+        # Track build and send initial notification
+        track_build_start(build_id, repo)
+        slack_webhook = os.getenv("SLACK_WEBHOOK_URL", "")
         asyncio.create_task(
             send_slack_pipeline_started(build_id, repo, extract_failed_files(raw_log))
+        )
+        # Schedule 5-minute health check
+        asyncio.create_task(
+            schedule_health_check(build_id, repo, slack_webhook, delay_seconds=300)
         )
         asyncio.create_task(
             self._run_pipeline_background(build_id, raw_log, repo, correlation_id)

@@ -343,23 +343,47 @@ async def send_slack_pipeline_started(
     """
     if not _SLACK_WEBHOOK_URL:
         return False
-    repo_line  = f"*Repo:* `{repo}`\n" if repo else ""
-    files_line = ("*Files:* " + ", ".join(f"`{f}`" for f in files) + "\n") if files else ""
-    payload = json.dumps({
-        "blocks": [
-            {"type": "header",
-             "text": {"type": "plain_text", "text": "⚙️ Auto-heal Started"}},
-            {"type": "section",
-             "text": {"type": "mrkdwn",
-                      "text": (f"*Build:* `{build_id}`\n{repo_line}{files_line}"
-                               "Pipeline running — analysing logs and "
-                               "generating fix. Result follows in a few minutes.")}},
-        ],
+    blocks = [
+        {"type": "header",
+         "text": {"type": "plain_text", "text": "⚙️  Auto-Heal Pipeline Started"}},
+        {"type": "section",
+         "fields": [
+             {"type": "mrkdwn", "text": f"🆔 *Build ID*\n`{build_id}`"},
+             {"type": "mrkdwn", "text": f"⏱️  *Status*\n🔄 Running"},
+         ]},
+        {"type": "divider"},
+    ]
+
+    if repo:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"📦 *Repository*\n`{repo}`"}
+        })
+
+    if files:
+        files_text = "📁 *Affected Files*\n" + ", ".join(f"`{f}`" for f in files)
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": files_text}
+        })
+
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn",
+                "text": (
+                    "🔍 *Analyzing* — logs being processed\n"
+                    "⚡ *Generating Fix* — LLM creating solution\n"
+                    "✅ *Quality Checks* — security & linting\n\n"
+                    "_Result will follow in a few minutes..._"
+                )}
     })
+
+    payload = json.dumps({"blocks": blocks})
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             resp = await client.post(
-                _SLACK_WEBHOOK_URL, content=payload,
+                _SLACK_WEBHOOK_URL,
+                content=payload.encode(),
                 headers={"Content-Type": "application/json"},
             )
         ok = resp.status_code == 200

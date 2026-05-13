@@ -391,37 +391,44 @@ Code Context:
 {code_context}
 {memory_context}
 
-CRITICAL: Generate ONLY the minimal fix. Do NOT:
-  ✗ Rename variables
-  ✗ Refactor logic
-  ✗ Add new functions
-  ✗ Rewrite docstrings
-  ✗ Change indentation unnecessarily
-  ✗ Optimize unrelated code
+MISSION: Fix the reported error AND scan the ENTIRE file for any additional bugs.
+Do NOT stop after fixing only the error shown in the logs — perform a full code review
+of the whole file and fix every bug you find (wrong operators, off-by-one, logic errors,
+type errors, self-assignments, wrong return values, etc.).
 
 DO:
-  ✓ Fix the specific error (typo, wrong operator, missing colon, etc)
-  ✓ Change ONLY the broken lines
-  ✓ Keep everything else exactly as-is
-  ✓ Add an inline comment on every line you actually changed:
+  ✓ Fix the specific reported error first
+  ✓ Scan all other functions/methods for additional bugs (wrong +/* operators,
+    counter += 0 instead of += 1, -= instead of +=, / len + 1 off-by-one, etc.)
+  ✓ Fix every bug you find across the entire file
+  ✓ Add an inline comment on EVERY line you actually changed:
        # AUTO-HEAL: was '<old code>' (<bug type>) -> <what was fixed>
-     Example:
-       right = mid - 1  # AUTO-HEAL: was 'right = right' (self-assignment) -> shrinks range
+     Examples:
+       total += d["qty"] * d["price"]   # AUTO-HEAL: was '+' (wrong operator) -> '*' for value
+       count += 1                        # AUTO-HEAL: was '+= 0' (no-op) -> '+= 1' to count
+       self.items[to_name]["quantity"] += quantity  # AUTO-HEAL: was '-=' (wrong direction) -> '+='
+       return total / len(prices)        # AUTO-HEAL: was '/ len + 1' (off-by-one) -> '/ len'
+       self.items[name]["price"] *= (1 - percent / 100)  # AUTO-HEAL: was '1 +' (increase not discount) -> '1 -'
+
+DO NOT:
+  ✗ Rename variables or parameters
+  ✗ Refactor working logic
+  ✗ Add new functions not needed for correctness
+  ✗ Rewrite docstrings
+  ✗ Add AUTO-HEAL to lines you did not change
+  ✗ Add AUTO-HEAL without the 'was <old code>' reference
 
 AUTO-HEAL COMMENT RULES (CRITICAL):
-  ✗ Do NOT add # AUTO-HEAL to lines you did not change
-  ✗ Do NOT add # AUTO-HEAL to new helper lines you inserted
-  ✗ Do NOT add # AUTO-HEAL without the 'was <old code>' reference
-  ✗ Do NOT add extra AUTO-HEAL comments on retry — only the real bug lines
-  ✓ Every AUTO-HEAL must describe what the original code was
-  ✓ The number of AUTO-HEAL comments MUST equal bug_count exactly"""
+  ✓ Every AUTO-HEAL must show what the original code was
+  ✓ bug_count and len(bugs_found) MUST be equal
+  ✓ One bugs_found entry per distinct logical bug — NOT one per changed line"""
 
 COMPLEX_REPAIR_TEMPLATE = """\
 Error Analysis:
 - Error Type: {error_type}
 - Root Cause: {root_cause}
 - Affected Files: {affected_files}
-- Bug Count: {bug_count} bugs detected — FULL REPAIR MODE
+- Minimum bugs known from logs/scanner: {bug_count} — FULL REPAIR MODE
 
 Build Logs:
 {cleaned_logs}
@@ -431,32 +438,43 @@ Broken Code (needs full repair):
 {memory_context}
 
 INSTRUCTIONS:
-  This code has {bug_count} bugs. Fix ALL of them and return the complete corrected file.
-  Do NOT use changed_lines — provide fix_code with the full working file content.
+  The static scanner and build logs identified at least {bug_count} bugs below.
+  But your job is NOT limited to this list — perform a full code review of the
+  ENTIRE file and fix every bug you find. The list below is a starting point,
+  not the complete picture.
 
-  Bugs to fix:
+  Known bugs (fix these + any others you find):
 {bug_list}
+
+  HOW TO FIND ALL BUGS — check each function for:
+  ✓ Wrong arithmetic operators (+ instead of *, += 0 instead of += 1)
+  ✓ Wrong direction (−= when += is needed, vice versa)
+  ✓ Off-by-one errors (/ len + 1, <= instead of <, < instead of <=)
+  ✓ Inverted signs (1 + percent/100 should be 1 - percent/100 for discount)
+  ✓ Self-assignments and no-ops (x = x, count += 0)
+  ✓ Wrong sentinel values (returning None instead of -1, False instead of True)
+  ✓ f-string syntax errors and invalid characters
+  ✓ Missing or incorrect branch logic
+  ✓ Type errors (str + int, wrong return type)
 
   The fixed code MUST:
   ✓ Compile without any SyntaxError
-  ✓ Use correct operators and logic
+  ✓ Use correct operators and logic throughout the ENTIRE file
   ✓ Keep the same function names and purpose
-  ✓ Return correct values (-1 for not found, etc.)
+  ✓ Return correct values in every function
 
   AUTO-HEAL COMMENT RULES (CRITICAL):
   ✗ Do NOT add # AUTO-HEAL to lines you did not change
   ✗ Do NOT add # AUTO-HEAL to new helper lines you inserted
   ✗ Do NOT add # AUTO-HEAL without the 'was <old code>' reference
-  ✗ Do NOT add extra AUTO-HEAL comments on retry attempts — only annotate
-    lines that contain actual bugs from the original code
   ✓ Every AUTO-HEAL must describe what the original code was
   ✓ The number of AUTO-HEAL comments MUST equal bug_count exactly
 
   REQUIRED OUTPUT FIELDS:
   - fix_code: complete corrected file
   - bug_count: exact number of bugs fixed (must equal len(bugs_found))
-  - bugs_found: NON-EMPTY list — one string per bug fixed
-    Example: ["missing colon after def", "arr[h+1] out-of-bounds → arr[h]", ...]
+  - bugs_found: NON-EMPTY list — one string per DISTINCT logical bug fixed
+    Example: ["+ instead of * in total_value", "count += 0 should be += 1", ...]
     CRITICAL: bugs_found MUST match the number of bugs you fixed.
     An empty bugs_found [] is INVALID — the response will be rejected."""
 

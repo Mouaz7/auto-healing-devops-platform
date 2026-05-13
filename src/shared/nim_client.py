@@ -86,8 +86,9 @@ class NimClient:
         self._slots = load_slot_configs(agent_env_prefix, slot_params)
         self.last_model: str = ""
         # One OpenAI client per slot — reused across calls to avoid reconnection overhead
+        # timeout=50s so the NIM call finishes before the 60s HTTP timeout in pipeline_steps
         self._clients = {
-            model: OpenAI(base_url=_NIM_BASE_URL, api_key=slot.api_key)
+            model: OpenAI(base_url=_NIM_BASE_URL, api_key=slot.api_key, timeout=50.0)
             for model, slot in self._slots.items()
         }
 
