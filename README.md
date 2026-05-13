@@ -4,8 +4,8 @@
 
 ### Automated Remediation in CI/CD: Design and Control of an AI-based Code Repair Agent
 
-[![Tests](https://img.shields.io/badge/tests-639%20passing-brightgreen?style=flat-square)](tests/)
-[![HITL](https://img.shields.io/badge/HITL-enforced-critical?style=flat-square)](src/orchestrator_mcp/pipeline_mixin.py)
+[![Tests](https://img.shields.io/badge/tests-662%20passing-brightgreen?style=flat-square)](tests/)
+[![HITL](https://img.shields.io/badge/HITL-enforced-critical?style=flat-square)](src/orchestrator_mcp/pipeline_finalise.py)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square)](https://python.org)
 [![License](https://img.shields.io/badge/thesis-PA2534%20BTH%202026-lightgrey?style=flat-square)](https://www.bth.se)
 
@@ -57,7 +57,7 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 
 | Design Decision | Code Location |
 |---|---|
-| 6-agent system: monitor (1) → classify (2) → clean (3) → analyse (4) → repair (5) → notify (6) | `src/orchestrator_mcp/pipeline_mixin.py` |
+| 6-agent system: monitor (1) → classify (2) → clean (3) → analyse (4) → repair (5) → notify (6) | `src/orchestrator_mcp/pipeline_steps.py` |
 | 5-stage log compression, ~90% token reduction before LLM | `src/log_cleaner_mcp/pipeline.py` |
 | Regex + LLM fallback error analysis for 11 error types, blast radius | `src/knowledge_graph_mcp/failure_analyser.py` |
 | Fix generation: retry loop 6–14 attempts, surgical patch or full rewrite | `src/llm_mcp/fix_generator.py` |
@@ -73,12 +73,12 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 | **Human-in-the-Loop (enforced)** | Auto-merge permanently **disabled** for all confidence levels. GREEN = fast-track review, YELLOW = careful review. Both send Slack Approve/Reject buttons. | `src/orchestrator_mcp/github_mixin.py:94` |
 | **Traffic light (file + bug + confidence)** | 🟢 GREEN: 1–3 files, ≤30 bugs/file, confidence ≥60%. 🟡 YELLOW: 4–5 files. 🔴 RED: >5 files, >30 bugs/file, or confidence <60%. | `src/notification_mcp/traffic_light_evaluator.py` |
 | **Architecture-aware fix strategy** | Classifies failing code into 7 layers (frontend/backend/database/infra/tests/mobile/data-ml) across 152 frameworks and 82 languages. Layer-specific guidance injected into the AI prompt. DB migrations get +30% severity, auth code +30%, K8s +20%. | `src/shared/architecture_classifier.py` |
-| **BLOCKED-state notification** | Regression loops and 422-rejected fixes send Slack RED alert immediately — no silent failures. | `src/orchestrator_mcp/pipeline_mixin.py:200` |
+| **BLOCKED-state notification** | Regression loops and 422-rejected fixes send Slack RED alert immediately — no silent failures. | `src/orchestrator_mcp/pipeline_steps.py` |
 | **Bandit security scan** | Scans every generated fix for HIGH-severity issues. Triggers LLM retry with feedback. | `src/shared/quality_gates.py` |
 | **Pylint linting (real score)** | Real weighted score via `--output-format=json2`. Low score reduces confidence modifier (−0.20 or −0.40). | `src/shared/quality_gates.py` |
 | **Secret scanner** | 11 regex patterns block hardcoded credentials before any GitHub push. | `src/shared/secret_scanner.py` |
 | **Audit trail** | Append-only JSONL log — every pipeline event with UTC timestamp. | `src/shared/audit_log.py` |
-| **Regression loop prevention** | Same files fail again after recent fix → workflow → BLOCKED + Slack RED. | `src/orchestrator_mcp/pipeline_mixin.py` |
+| **Regression loop prevention** | Same files fail again after recent fix → workflow → BLOCKED + Slack RED. | `src/orchestrator_mcp/pipeline_steps.py` |
 | **Retry limits** | Max 6–14 attempts by bug complexity. `FixStillBrokenError` on exhaustion. | `src/llm_mcp/fix_generator.py:254` |
 | **CI loop guard** | Auto-heal commits use branch prefix `auto-heal/<build_id>` and titles `[auto-heal][COLOUR]` so external CI can exclude them with branch-name or commit-message filters. | `src/gerrit_mcp/patch_submitter.py` |
 | **Protected paths** | AI cannot modify `.github/`, `Dockerfile`, `pyproject.toml`, or infra files. | `src/gerrit_mcp/gerrit_helpers.py:is_protected_path` |
@@ -94,7 +94,7 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 | AI targets symptom not root cause | 63-pattern static scanner pre-annotates code with bug locations before LLM call | `src/llm_mcp/bug_scanner.py` |
 | AI cannot be trusted to merge | **Auto-merge disabled** — human clicks Merge on GitHub | `src/orchestrator_mcp/github_mixin.py` |
 | No accountability or traceability | Audit trail + PR body with confidence, root cause, elapsed time | `src/shared/audit_log.py` |
-| System loops infinitely | Regression block + CI guard prevent infinite repair cycles | `src/orchestrator_mcp/pipeline_mixin.py` |
+| System loops infinitely | Regression block + CI guard prevent infinite repair cycles | `src/orchestrator_mcp/pipeline_steps.py` |
 | Confidence score is opaque | Decision Reason shown in every notification: "1 file, 19 bugs, confidence 95%". `auto_merge_allowed` always `False`. | `src/notification_mcp/traffic_light_evaluator.py` |
 | Thresholds don't fit the domain | Adaptive thresholds self-calibrate from human approve/reject decisions | `src/shared/adaptive_thresholds.py` |
 
@@ -304,9 +304,9 @@ POST /tools/handle_build_failure
      • Secret scan  •  Bandit  •  Pylint
      • Retry on security issues (up to budget)
   │
-  ▼  🆕 [Diff Bug Counter]  Authoritative token-level diff
-     • Walks original vs fix line by line
-     • Counts each distinct token-group change as 1 bug
+  ▼  🆕 [Diff Bug Counter]  Authoritative line-level diff
+     • Walks original vs fix line by line — 1 entry per changed line
+     • Multiple token changes on same line noted as "(k changes)" suffix
      • Same source feeds traffic-light, PR report, and Slack — they always agree
   │
   ▼  [Agent 6]  Evaluate & Notify
@@ -452,17 +452,17 @@ Step 3 — GREEN:
 
 The 60% confidence floor is **adaptive per error type** — after 5+ human decisions, the threshold self-calibrates: `new_floor = mean(approved_confidences) − 0.03`. Stored in append-only JSONL, cached in memory.
 
-### Bug Counting (token-level diff)
+### Bug Counting (line-level diff)
 
-Bug count is computed by an **authoritative token-level diff** between the original and fixed file — not the LLM's self-reported count.
+Bug count is computed by an **authoritative line-level diff** between the original and fixed file — not the LLM's self-reported count.
 
 | Granularity | Example: `arr[idx], arr[l] = arr[l], arr[idx]` → `arr[idx], arr[k] = arr[k], arr[idx]` |
 |---|---|
-| Per-line (too coarse) | 1 bug |
-| **Per-token (used)** | **2 bugs** (each `l` → `k` is independent) |
+| **Per-line (used)** | **1 bug** — the line changed; if multiple tokens differ, noted as `(2 changes)` |
+| Per-token (too granular) | 2 entries for the same line — misaligns with the PR table |
 | Per-character (too granular) | counts whitespace/formatting changes |
 
-The same diff feeds the traffic-light evaluator, the PR report, and Slack — they always agree on the count.
+Each changed line produces exactly one bug entry. If multiple tokens on the same line differ, the count still increments by 1 with a `(k changes)` suffix in the description. The same diff feeds the traffic-light evaluator, the PR report, and Slack — they always agree on the count.
 
 ---
 
@@ -783,9 +783,9 @@ Every auto-heal fix opens a GitHub Pull Request with a detailed structured repor
 
 | Section | Content |
 |---|---|
-| 📊 **Summary** | Build ID, traffic light, confidence + 🟩🟨🟥 emoji bar, **Decision Reason** (e.g. "1 file, 19 bugs, confidence 95%"), **Architecture Layer** (e.g. "⚙️ Backend · API endpoint · FastAPI · Python on CPython · 🔗 also: DATABASE · ⚠️ +15% risk"), error type, blast radius, **bugs found** (token-level diff count), AI attempts, **model used** (e.g. `qwen/qwen2.5-coder-32b-instruct`), time to fix |
+| 📊 **Summary** | Build ID, traffic light, confidence + 🟩🟨🟥 emoji bar, **Decision Reason** (e.g. "1 file, 19 bugs, confidence 95%"), **Architecture Layer** (e.g. "⚙️ Backend · API endpoint · FastAPI · Python on CPython · 🔗 also: DATABASE · ⚠️ +15% risk"), error type, blast radius, **bugs found** (line-level diff count), AI attempts, **model used** (e.g. `qwen/qwen2.5-coder-32b-instruct`), time to fix |
 | 🔍 **Error Analysis** | Root cause, error type detail, blast radius explanation |
-| 🐛 **Bug Report** | Per-bug list with exact line numbers and AUTO-HEAL descriptions (from token-level diff) |
+| 🐛 **Bug Report** | Per-bug list with exact line numbers and AUTO-HEAL descriptions (from line-level diff) |
 | 🛠️ **Fix Strategy** | AI explanation of fix approach + detailed description |
 | 📁 **Affected Files** | List of all files modified |
 | 🔄 **Full File Before vs After** | Collapsible: **annotated** original with `# ← BUG: <description>` markers + fixed file with `# AUTO-HEAL:` comments |
@@ -809,7 +809,7 @@ def partition(arr, l, h):
 
 ### Bug Report Format
 
-The PR Bug Report uses the token-level diff result. Each entry shows the line number and the AUTO-HEAL description the AI wrote inline:
+The PR Bug Report uses the line-level diff result. Each entry shows the line number and the AUTO-HEAL description the AI wrote inline:
 
 ```
 🐛 Bug Report — 19 bug(s) with exact line numbers
@@ -1012,7 +1012,7 @@ Every morning at 08:00 UTC: builds processed, success rates, top error types, tr
 
 ## 15. Test Suite
 
-**639 unit tests passing** · 23 traffic-light tests need updating (still test the deprecated blast-radius score formula — the new logic uses files + bugs/file + AI confidence, see Section 5)
+**662 unit tests passing** · 23 traffic-light tests need updating (still test the deprecated blast-radius score formula — the new logic uses files + bugs/file + AI confidence, see Section 5)
 
 <details>
 <summary>Unit test coverage (click to expand)</summary>
@@ -1032,7 +1032,7 @@ Every morning at 08:00 UTC: builds processed, success rates, top error types, tr
 | GitHub Webhook | HMAC signature, branch parsing |
 | Traffic Light | file + bug + confidence rules, RED overrides, adaptive floor |
 | Architecture Classifier | 152 frameworks, 82 languages, 55 sub-layers, cross-layer detection, severity boosts |
-| Diff Bug Counter | token-level diff, whitespace normalisation, AUTO-HEAL parsing |
+| Diff Bug Counter | line-level diff, whitespace normalisation, AUTO-HEAL parsing |
 | Log Cleaner | each of 5 filters individually + full pipeline |
 | Error Analyst | all 11 error types, pytest format, blast radius |
 | Code Repairer | parsing, retry, FixTooLongError, SecretLeakError |
@@ -1208,13 +1208,26 @@ auto-healing-devops-platform/
 │   │   ├── task_complexity.py      # Deterministic complexity scorer
 │   │   ├── resilience.py           # Circuit breaker + global fallback
 │   │   ├── nim_client.py           # NVIDIA NIM client, 4-slot fallback + last_model tracking
+│   │   ├── model_fallback.py       # Primary → fallback chain manager
+│   │   ├── token_tracker.py        # Per-agent hourly token budget (thread-safe)
+│   │   ├── cost_tracker.py         # USD cost estimation per NIM API call
+│   │   ├── metrics.py              # Prometheus metrics for all 6 agents
+│   │   ├── config.py               # Agent model config, token limits, service URLs
+│   │   ├── mcp_base.py             # Base class for all MCP services (/health + /metrics)
 │   │   └── models.py               # Domain models, enums
 │   │
 │   ├── orchestrator_mcp/           # :8085 — Central pipeline controller
-│   │   ├── pipeline_mixin.py       # handle_build_failure + Agent 3→4→5→6
-│   │   ├── github_mixin.py         # PR creation (HITL — auto-merge disabled)
+│   │   ├── pipeline_mixin.py       # Thin combiner — inherits entry + steps + finalise
+│   │   ├── pipeline_entry.py       # HTTP endpoint, sync/background runners, safe_fail
+│   │   ├── pipeline_steps.py       # Agent steps 3→4→5→6, diff bug counter, regression guard
+│   │   ├── pipeline_finalise.py    # report_data assembly, PR creation, HITL (auto-merge disabled)
+│   │   ├── pipeline_helpers.py     # Pure stateless helpers (testable without server)
+│   │   ├── github_mixin.py         # Slack Approve/Reject → GitHub merge gate
 │   │   ├── slack_mixin.py          # Approve / Reject button handler
 │   │   ├── workflow.py             # State machine + pruning
+│   │   ├── workflow_api_mixin.py   # REST endpoints for workflow CRUD
+│   │   ├── admin_mixin.py          # Stats, retry, and AI code review endpoints
+│   │   ├── rate_limiter.py         # Sliding-window rate limiter (protects /handle_build_failure)
 │   │   └── deduplication.py        # 24h error fingerprint cache
 │   │
 │   ├── llm_mcp/                    # :8086 — Agent 5, Code Repairer
@@ -1222,7 +1235,12 @@ auto-healing-devops-platform/
 │   │   ├── bug_scanner.py          # 63-pattern AST scanner injected before LLM prompt
 │   │   ├── fix_validators.py       # AST + sandboxed run + 14 runtime error hints
 │   │   ├── fix_prompts.py          # Retry prompt builder + stuck-loop pivot + emergency rewrite
-│   │   └── fix_parsers.py          # Surgical patch + JSON parser
+│   │   ├── fix_parsers.py          # Surgical patch + JSON parser
+│   │   ├── fix_prompt_builder.py   # Prompt construction + retry-budget calculation
+│   │   ├── fix_code_handler.py     # LLM response extraction, length validation, bug-list resolution
+│   │   ├── autoheal_parser.py      # AUTO-HEAL comment parser → structured bug list
+│   │   ├── prompt_templates.py     # Module-level prompt template constants
+│   │   └── fix_exceptions.py       # Exception types for the fix-generation pipeline
 │   │
 │   ├── knowledge_graph_mcp/        # :8084 — Agent 4, Error Analyst
 │   │   ├── failure_analyser.py     # Regex + LLM, 11 error types, blast radius
@@ -1241,14 +1259,19 @@ auto-healing-devops-platform/
 │   │
 │   ├── gerrit_mcp/                 # :8083 — GitHub PR manager
 │   │   ├── patch_submitter.py      # Branch, commit, PR, rate-limit handling
+│   │   ├── pr_body_builder.py      # Full GitHub PR markdown assembly
+│   │   ├── pr_bug_table.py         # Bug → fix table builders (changed_lines / scan / LLM)
+│   │   ├── code_fetcher.py         # Fetch source files from local fs, GitHub, or Gerrit
+│   │   ├── github_approver.py      # PR approval checker (AWAITING_REVIEW → APPLYING_FIX)
 │   │   └── gerrit_helpers.py       # Protected paths, sanitize_files
 │   │
 │   └── scheduler/                  # Background tasks
 │       ├── daily_digest.py         # Morning Slack intelligence report
+│       ├── monitor.py              # Polls GitHub Issues / Jira every 15 min → routes to orchestrator
 │       └── task_classifier.py      # Agent 2: Scenario A/B classification
 │
 └── tests/
-    ├── unit/                       # 639 passing (no Docker)
+    ├── unit/                       # 662 passing (no Docker)
     └── integration/                # End-to-end pipeline tests
 ```
 
