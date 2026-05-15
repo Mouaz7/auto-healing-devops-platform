@@ -19,7 +19,7 @@
 
 ## What is this?
 
-A self-healing CI/CD system built in Python. When a build fails on GitHub, **6 AI agents** automatically analyse the error, generate a code fix, run security and quality scans, open a Pull Request — and notify a human for review. The system never merges without human approval.
+A self-healing CI/CD system built in Python. When a build fails on GitHub, **6 AI agents** automatically analyse the error, generate a code fix, run security and quality scans, open a Pull Request and notify a human for review. The system never merges without human approval.
 
 Built as a research prototype (PoC) to answer three thesis research questions about trust, control mechanisms, and the design of autonomous agents in software engineering pipelines.
 
