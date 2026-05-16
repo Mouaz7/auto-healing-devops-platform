@@ -29,12 +29,10 @@ def _webhook_secret() -> str:
     return server._GITHUB_WEBHOOK_SECRET  # pylint: disable=protected-access
 
 
-def _pr_title(build_id: str, auto_merge: bool) -> str:
-    return (
-        f"[auto-heal][GREEN] Auto-fix build {build_id}"
-        if auto_merge else
-        f"[auto-heal][YELLOW] Human review required — build {build_id}"
-    )
+def _pr_title(build_id: str, colour: str) -> str:
+    if colour == "GREEN":
+        return f"[auto-heal][GREEN] Auto-fix build {build_id}"
+    return f"[auto-heal][YELLOW] Human review required — build {build_id}"
 
 
 async def _submit_patch(
@@ -47,12 +45,13 @@ async def _submit_patch(
     report_data: dict | None = None,
 ) -> dict:
     """Single source of truth for calling gerrit-mcp /tools/submit_patch."""
+    colour = (report_data or {}).get("colour", "YELLOW")
     payload: dict = {
         "build_id":       build_id,
         "repo":           repo,
         "patch":          patch,
         "affected_files": affected_files,
-        "title":          _pr_title(build_id, auto_merge),
+        "title":          _pr_title(build_id, colour),
     }
     if report_data:
         payload.update(report_data)

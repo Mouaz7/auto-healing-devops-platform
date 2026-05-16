@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import os
 import re
 import subprocess
 import tempfile
@@ -432,7 +433,6 @@ def validate_fix_runtime(fix_code: str, timeout_s: int = 5) -> tuple[bool, str]:
     finally:
         if tmp_path:
             try:
-                import os
                 os.unlink(tmp_path)
             except OSError:
                 pass

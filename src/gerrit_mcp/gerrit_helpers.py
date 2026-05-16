@@ -59,7 +59,16 @@ def is_protected_path(path: str) -> bool:
 
 
 def sanitize_files(files: list[str]) -> list[str]:
-    """Drop empty, hallucinated, protected, or non-Python paths."""
+    """Drop empty, hallucinated, protected, or non-Python paths.
+
+    NOTE: Only .py files are accepted. The patch-submission flow writes
+    the fixed content directly to GitHub via the contents API using
+    base64-encoded bytes, which requires knowing the exact encoding.
+    Python source files are UTF-8 by PEP 3120; supporting other languages
+    (Go, TypeScript, Java, etc.) would require per-language encoding logic.
+    This is a known limitation — extend this filter when multi-language
+    patch submission is implemented.
+    """
     result: list[str] = []
     for f in files or []:
         if not f:
@@ -75,6 +84,7 @@ def sanitize_files(files: list[str]) -> list[str]:
             logger.warning("rejecting protected path from AI fix: %s", f)
             continue
         if not f.endswith(".py"):
+            logger.debug("sanitize_files: skipping non-Python file %s", f)
             continue
         result.append(f.lstrip("./"))
     return result

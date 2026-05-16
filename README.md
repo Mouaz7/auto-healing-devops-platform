@@ -61,7 +61,7 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 | 5-stage log compression, ~90% token reduction before LLM | `src/log_cleaner_mcp/pipeline.py` |
 | Regex + LLM fallback error analysis for 11 error types, blast radius | `src/knowledge_graph_mcp/failure_analyser.py` |
 | Fix generation: retry loop 6–14 attempts, surgical patch or full rewrite | `src/llm_mcp/fix_generator.py` |
-| Proactive AST bug scanner: 83 patterns + regex fallback layer injected into prompt before LLM sees traceback | `src/llm_mcp/bug_scanner.py` |
+| Proactive AST bug scanner: 82 patterns + regex fallback layer injected into prompt before LLM sees traceback | `src/llm_mcp/bug_scanner.py` |
 | 11 runtime error hints in retry prompts: TypeError, IndexError, KeyError, RecursionError, AttributeError, NameError, ValueError, ZeroDivisionError, SyntaxError, IndentationError, AssertionError | `src/llm_mcp/fix_prompts.py` |
 | Stuck-loop pivot: identical error type twice → strategy change in prompt | `src/llm_mcp/fix_prompts.py:45` |
 | 4-model fallback chain per agent, complexity-based model routing | `src/shared/nim_client.py`, `src/shared/task_complexity.py` |
@@ -91,7 +91,7 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 | AI introduces security vulnerabilities | Bandit scan → retry or block | `src/shared/quality_gates.py` |
 | AI produces low-quality code | Pylint real score → confidence penalty | `src/shared/quality_gates.py` |
 | AI hallucinates wrong fixes | AST parse + sandboxed subprocess run + 11 runtime hints in retry prompt before accepting | `src/llm_mcp/fix_validators.py`, `src/llm_mcp/fix_prompts.py` |
-| AI targets symptom not root cause | 83-pattern dual-layer scanner (AST + regex) pre-annotates code with bug locations before LLM call | `src/llm_mcp/bug_scanner.py` |
+| AI targets symptom not root cause | 82-pattern dual-layer scanner (AST + regex) pre-annotates code with bug locations before LLM call | `src/llm_mcp/bug_scanner.py` |
 | AI cannot be trusted to merge | **Auto-merge disabled** — human clicks Merge on GitHub | `src/orchestrator_mcp/github_mixin.py` |
 | No accountability or traceability | Audit trail + PR body with confidence, root cause, elapsed time | `src/shared/audit_log.py` |
 | System loops infinitely | Regression block + CI guard prevent infinite repair cycles | `src/orchestrator_mcp/pipeline_steps.py` |
@@ -146,7 +146,7 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
                             ▼
    ┌─────────────────────────────────────────────────────────┐
    │ Agent 5 — Code Repairer     (llm-mcp           :8086)   │
-   │ 83-pattern dual-layer scanner (AST+regex) → LLM →       │
+   │ 82-pattern dual-layer scanner (AST+regex) → LLM →       │
    │ AUTO-HEAL annotations · Bandit + Pylint + secret scan   │
    │ Bandit + Pylint + secret scanner · 6–14 retry attempts  │
    └────────────────────────┬────────────────────────────────┘
@@ -246,7 +246,7 @@ Built as a research prototype (PoC) to answer three thesis research questions ab
 | Aspect | Details |
 |---|---|
 | Code | `src/llm_mcp/fix_generator.py` (`FixGenerator`) |
-| Pre-LLM | 83-pattern dual-layer scanner (AST + regex) annotates code with bug locations; full-file scanning mode triggered when 2+ patterns detected |
+| Pre-LLM | 82-pattern dual-layer scanner (AST + regex) annotates code with bug locations; full-file scanning mode triggered when 2+ patterns detected |
 | Strategy | Surgical patch (small fix) OR full rewrite (multi-bug) — chosen by complexity score. **Complex mode auto-triggered** when: 10+ total bugs, 2+ AST patterns detected, or syntax errors present. Prompts explicitly instruct: "Fix reported error AND scan ENTIRE file for additional bugs" |
 | Bug counting | Dual-layer: log-based count (from traceback) + AST scanner count (logic bugs); effective count = max of both → scales retry budget |
 | Retry budget | 6 attempts (≤2 bugs) · 8 (3–9) · 14 (10–40) — scales with bug density, dynamically updated when LLM reports bug_count |
@@ -692,7 +692,7 @@ The retry counter is stored per fix record. After the 60-minute window expires, 
 ### 83-Pattern Dual-Layer Scanner (`src/llm_mcp/bug_scanner.py`)
 
 Before the LLM generates a fix, the pipeline runs a dual-layer scan on the original broken code:
-1. **AST layer** (83 patterns) — detects logic bugs, operator errors, semantic issues invisible to syntax checkers
+1. **AST layer** (82 patterns) — detects logic bugs, operator errors, semantic issues invisible to syntax checkers
 2. **Regex layer** — catches textual anti-patterns like `+= 0`, `1 +` in discount logic, quantity+price combinations
 
 Findings are **injected into the fix prompt** so the model knows exactly what to look for — instead of tunnel-visioning on the traceback symptom line. When 2+ patterns are detected, the system automatically escalates to **full-file repair mode** for comprehensive fixing.
@@ -1070,7 +1070,7 @@ Every morning at 08:00 UTC: builds processed, success rates, top error types, tr
 | Secret Scanner | all 11 patterns, safe-pattern exclusions |
 | Quality Gates | Bandit scan, real Pylint score, confidence modifiers |
 | Fix Helpers | NoneType hint, 14 runtime error hints, fingerprint, strategy pivot, emergency rewrite |
-| Bug Scanner | 83-pattern dual-layer (AST + regex): accumulator init, mutable class attr, assert-tuple, shared list multiply, no-op operations, discount sign errors, transfer direction bugs, recursion base-case, etc. |
+| Bug Scanner | 82-pattern dual-layer (AST + regex): accumulator init, mutable class attr, assert-tuple, shared list multiply, no-op operations, discount sign errors, transfer direction bugs, recursion base-case, etc. |
 | Circuit Breaker | CLOSED → OPEN → HALF_OPEN → CLOSED |
 | Model Fallback | chain, AllModelsFailed, slot reset |
 | Workflow Engine | state transitions, InvalidTransitionError, pruning |
@@ -1277,7 +1277,7 @@ auto-healing-devops-platform/
 │   │
 │   ├── llm_mcp/                    # :8086 — Agent 5, Code Repairer
 │   │   ├── fix_generator.py        # Retry loop: LLM → validate → Bandit → Pylint
-│   │   ├── bug_scanner.py          # 63-pattern AST scanner injected before LLM prompt
+│   │   ├── bug_scanner.py          # 82-pattern AST scanner injected before LLM prompt
 │   │   ├── fix_validators.py       # AST + sandboxed run + 14 runtime error hints
 │   │   ├── fix_prompts.py          # Retry prompt builder + stuck-loop pivot + emergency rewrite
 │   │   ├── fix_parsers.py          # Surgical patch + JSON parser

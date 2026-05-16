@@ -9,9 +9,9 @@ from enum import Enum
 class TrafficLightColour(str, Enum):
     """Traffic light result for a generated fix."""
 
-    GREEN = "GREEN"    # score >= 0.85  → auto-merge allowed
-    YELLOW = "YELLOW"  # score 0.60-0.84 → human review required
-    RED = "RED"        # score < 0.60   → blocked
+    GREEN = "GREEN"    # score >= 0.85  → human fast-track review
+    YELLOW = "YELLOW"  # score 0.60-0.84 → human careful review required
+    RED = "RED"        # score < 0.60   → blocked, no PR created
 
 
 class BlastRadius(str, Enum):

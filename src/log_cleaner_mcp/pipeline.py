@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from src.log_cleaner_mcp.filters.ansi_remover import remove_ansi
 from src.log_cleaner_mcp.filters.deduplicator import deduplicate
 from src.log_cleaner_mcp.filters.noise_filter import filter_noise
+from src.log_cleaner_mcp.filters.stack_trace_extractor import extract_stack_traces
 from src.log_cleaner_mcp.filters.timestamp_stripper import strip_timestamps
 from src.shared.metrics import log_reduction_ratio
 from src.shared.nim_client import NimClient, SlotParams
@@ -57,12 +58,16 @@ def _line_count(text: str) -> int:
 
 
 def _apply_regex_pipeline(raw: str) -> str:
-    """Run all regex filters in sequence."""
-    text = remove_ansi(raw)
-    text = strip_timestamps(text)
-    text = filter_noise(text)
-    text = deduplicate(text)
-    return text
+    """Run all regex filters in sequence (5-stage pipeline)."""
+    text = remove_ansi(raw)           # stage 1
+    text = strip_timestamps(text)     # stage 2
+    text = filter_noise(text)         # stage 3
+    text = deduplicate(text)          # stage 4
+    extracted = extract_stack_traces(text)  # stage 5
+    # Only use the extracted block if it captured something — a log that has
+    # no recognisable stack trace should pass through as-is rather than
+    # producing an empty result that sends Agent 4 nothing to work with.
+    return extracted if extracted.strip() else text
 
 
 def _llm_clean(raw: str, nim: NimClient) -> str:

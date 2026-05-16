@@ -148,26 +148,26 @@ class TestCircuitBreakerStateTransitions:
 
     def test_open_to_half_open_on_timeout(self):
         """OPEN → HALF_OPEN on timeout."""
-        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.1)
+        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.05)
         cb.record_failure()
         assert cb.state == CircuitState.OPEN
-        time.sleep(0.15)
+        time.sleep(0.20)   # well above recovery_timeout for slow CI machines
         assert cb.state == CircuitState.HALF_OPEN
 
     def test_half_open_to_closed_on_success(self):
         """HALF_OPEN → CLOSED on success."""
-        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.1)
+        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.05)
         cb.record_failure()
-        time.sleep(0.15)
+        time.sleep(0.20)   # well above recovery_timeout for slow CI machines
         assert cb.state == CircuitState.HALF_OPEN
         cb.record_success()
         assert cb.state == CircuitState.CLOSED
 
     def test_half_open_to_open_on_failure(self):
         """HALF_OPEN → OPEN on failure."""
-        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.1)
+        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.05)
         cb.record_failure()
-        time.sleep(0.15)
+        time.sleep(0.20)   # well above recovery_timeout for slow CI machines
         assert cb.state == CircuitState.HALF_OPEN
         cb.record_failure()
         # After 1 failure in HALF_OPEN (with threshold=1), goes back to OPEN

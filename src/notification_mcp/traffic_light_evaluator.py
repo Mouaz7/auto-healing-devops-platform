@@ -1,19 +1,20 @@
 """Traffic light evaluator for Agent 6 (Review & Notify).
 
-Scoring model:
-    final_score = confidence * 0.6 + blast_factor * 0.4
+Decision model (file count + bugs/file + AI confidence):
 
-    blast_factor:
-        HIGH   → 0.0  (and always forces RED with safety_override=True)
-        MEDIUM → 0.6
-        LOW    → 1.0
+    Step 1 — RED overrides (any one triggers RED immediately):
+        • confidence < confidence_floor (default 0.60, adaptive per error type)
+        • bugs_per_file > MAX_BUGS_PER_FILE (30)
+        • num_files > MAX_FILES_YELLOW (5)
 
-    Thresholds:
-        final_score ≥ 0.85 → GREEN
-        final_score ≥ 0.60 → YELLOW
-        final_score < 0.60 → RED
+    Step 2 — YELLOW:
+        • 4–5 files affected, ≤30 bugs/file, confidence ≥ confidence_floor
 
-    Bug overload: bugs_per_file > MAX_BUGS_PER_FILE → RED regardless of score.
+    Step 3 — GREEN:
+        • 1–3 files, ≤30 bugs/file, confidence ≥ confidence_floor
+
+    Adaptive thresholds: the confidence_floor shifts per error type based on
+    historical human approve/reject decisions (see adaptive_thresholds.py).
 
 Human-in-the-Loop (HITL) policy:
     ALL fixes — including GREEN — require explicit human approval before merging.
@@ -21,6 +22,7 @@ Human-in-the-Loop (HITL) policy:
 """
 from __future__ import annotations
 
+from src.shared.adaptive_thresholds import adaptive_thresholds
 from src.shared.metrics import confidence_score, workflows_total
 from src.shared.models import (
     BlastRadius,
@@ -30,74 +32,65 @@ from src.shared.models import (
     TrafficLightResult,
 )
 
-MAX_BUGS_PER_FILE = 30   # more than this in one file → RED
-GREEN_THRESHOLD   = 0.85
-YELLOW_THRESHOLD  = 0.60
-
-_BLAST_FACTOR: dict[BlastRadius, float] = {
-    BlastRadius.LOW:    1.0,
-    BlastRadius.MEDIUM: 0.6,
-    BlastRadius.HIGH:   0.0,
-}
+MAX_FILES_GREEN   = 3    # 1–3 files → eligible for GREEN
+MAX_FILES_YELLOW  = 5    # 4–5 files → YELLOW; >5 → RED
+MAX_BUGS_PER_FILE = 30   # bugs/file above this → RED
+MIN_CONFIDENCE    = 0.60 # default confidence floor (adaptive shifts this per error type)
 
 
 def evaluate_traffic_light(
     code_fix: CodeFix,
     analysis: FailureAnalysis,
 ) -> TrafficLightResult:
-    """Compute a TrafficLightResult using the weighted scoring model."""
+    """Compute a TrafficLightResult using file count + bugs/file + confidence."""
 
-    blast_radius = analysis.blast_radius
-    confidence   = code_fix.confidence
-    num_files    = len(analysis.affected_files) if analysis.affected_files else 1
-    num_bugs     = len(code_fix.bugs_found)
+    blast_radius  = analysis.blast_radius
+    confidence    = code_fix.confidence
+    num_files     = len(analysis.affected_files) if analysis.affected_files else 1
+    num_bugs      = len(code_fix.bugs_found)
+    error_type    = str(analysis.error_type)
 
-    # HIGH blast radius always forces RED with safety override.
-    if blast_radius == BlastRadius.HIGH:
-        blast_factor = _BLAST_FACTOR[BlastRadius.HIGH]
-        final_score  = round(confidence * 0.6 + blast_factor * 0.4, 4)
-        reason = (
-            f"HIGH blast radius — safety override engaged "
-            f"(confidence {confidence:.0%}, score {final_score:.2f})"
-        )
-        return _result(
-            code_fix, TrafficLightColour.RED, final_score,
-            reason, blast_radius, safety_override=True,
-        )
-
-    blast_factor = _BLAST_FACTOR.get(blast_radius, 1.0)
-    final_score  = round(confidence * 0.6 + blast_factor * 0.4, 4)
-
-    # Bug overload check.
     bugs_per_file = num_bugs / max(num_files, 1)
+
+    # Adaptive confidence floor — shifts per error type based on human decisions
+    _, yellow_t = adaptive_thresholds.get_thresholds(error_type)
+    confidence_floor = max(MIN_CONFIDENCE, yellow_t)
+
+    # Step 1: RED overrides (any condition blocks the fix)
+    if confidence < confidence_floor:
+        reason = (
+            f"AI confidence too low ({confidence:.0%} < {confidence_floor:.0%}) — fix blocked"
+        )
+        return _result(code_fix, TrafficLightColour.RED, confidence, reason, blast_radius)
+
     if bugs_per_file > MAX_BUGS_PER_FILE:
         reason = (
             f"Too many bugs per file ({bugs_per_file:.0f} > {MAX_BUGS_PER_FILE}) — "
             "file too broken for reliable AI fix"
         )
-        return _result(code_fix, TrafficLightColour.RED, final_score, reason, blast_radius)
+        return _result(code_fix, TrafficLightColour.RED, confidence, reason, blast_radius)
 
-    # Score-based classification.
-    if final_score >= GREEN_THRESHOLD:
-        colour = TrafficLightColour.GREEN
+    if num_files > MAX_FILES_YELLOW:
         reason = (
-            f"High confidence fix — {num_files} file(s), "
-            f"{num_bugs} bug(s), score {final_score:.2f}"
+            f"Too many files affected ({num_files} > {MAX_FILES_YELLOW}) — "
+            "change scope too wide"
         )
-    elif final_score >= YELLOW_THRESHOLD:
-        colour = TrafficLightColour.YELLOW
-        reason = (
-            f"Moderate confidence — {num_files} file(s), "
-            f"score {final_score:.2f}, careful review required"
-        )
-    else:
-        colour = TrafficLightColour.RED
-        reason = (
-            f"Score too low ({final_score:.2f} < {YELLOW_THRESHOLD}) — "
-            f"confidence {confidence:.0%} fix blocked"
-        )
+        return _result(code_fix, TrafficLightColour.RED, confidence, reason, blast_radius)
 
-    return _result(code_fix, colour, final_score, reason, blast_radius)
+    # Step 2: YELLOW (4–5 files)
+    if num_files > MAX_FILES_GREEN:
+        reason = (
+            f"{num_files} files affected — careful review required "
+            f"(confidence {confidence:.0%})"
+        )
+        return _result(code_fix, TrafficLightColour.YELLOW, confidence, reason, blast_radius)
+
+    # Step 3: GREEN (1–3 files)
+    reason = (
+        f"High confidence fix — {num_files} file(s), "
+        f"{num_bugs} bug(s), confidence {confidence:.0%}"
+    )
+    return _result(code_fix, TrafficLightColour.GREEN, confidence, reason, blast_radius)
 
 
 def _result(

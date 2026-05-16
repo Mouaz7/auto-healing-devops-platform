@@ -41,6 +41,16 @@ class PipelineStepsMixin:
         cleaned  = await self._step_clean_logs(client, build_id, raw_log, headers)
         analysis = await self._step_analyse(client, build_id, raw_log, cleaned, headers)
 
+        # Dedup check: if the same error fingerprint was processed within 24 h,
+        # skip all expensive downstream steps (fetch, LLM, notify, PR creation).
+        dedup_hit = dedup_cache.check(
+            error_type=analysis["error_type"],
+            root_cause=analysis.get("root_cause", ""),
+            affected_files=analysis["affected_files"],
+        )
+        if dedup_hit:
+            return self._dedup_result(build_id, dedup_hit)
+
         if self._check_regression(build_id, analysis):
             elapsed_s = round(time.monotonic() - started_at)
             self.engine.advance(build_id, WorkflowStatus.BLOCKED)
@@ -110,14 +120,6 @@ class PipelineStepsMixin:
         verdict = await self._step_notify(
             client, build_id, fix, analysis, headers, elapsed_s=elapsed_s,
         )
-
-        dedup_hit = dedup_cache.check(
-            error_type=analysis["error_type"],
-            root_cause=analysis.get("root_cause", ""),
-            affected_files=analysis["affected_files"],
-        )
-        if dedup_hit:
-            return self._dedup_result(build_id, dedup_hit)
 
         return await self._finalise(
             client, build_id, repo, analysis, fix, verdict,

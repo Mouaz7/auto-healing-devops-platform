@@ -125,7 +125,6 @@ class FixGenerator:
         # retry budget and complex_mode decision reflect the full picture.
         scanner_count = len(BugPatternScanner.scan(code_context).findings)
         bug_count = max(log_bug_count, scanner_count)
-        bug_count = max(bug_count, scanner_count)
 
         complex_mode = (
             bug_count >= COMPLEX_MODE_THRESHOLD

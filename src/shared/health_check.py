@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Any
 
 import httpx
@@ -20,7 +20,7 @@ _build_checks: dict[str, dict[str, Any]] = {}
 def track_build_start(build_id: str, repo: str) -> None:
     """Record that a build has started auto-healing."""
     _build_checks[build_id] = {
-        "started_at": datetime.utcnow(),
+        "started_at": datetime.now(UTC),
         "repo": repo,
         "checked": False,
     }
@@ -64,7 +64,7 @@ async def _send_health_check_update(
         logger.warning("health_check_missing_record build_id=%s", build_id)
         return
 
-    elapsed = (datetime.utcnow() - started_at).total_seconds()
+    elapsed = (datetime.now(UTC) - started_at).total_seconds()
     elapsed_str = f"{int(elapsed // 60)}m {int(elapsed % 60)}s"
 
     # Build the 5-minute check message with rich formatting
@@ -128,7 +128,7 @@ async def _send_health_check_update(
 
 def cleanup_old_checks(max_age_hours: int = 24) -> None:
     """Remove old build checks from memory."""
-    cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+    cutoff = datetime.now(UTC) - timedelta(hours=max_age_hours)
     old_builds = [
         bid for bid, record in _build_checks.items()
         if record.get("started_at", cutoff) < cutoff

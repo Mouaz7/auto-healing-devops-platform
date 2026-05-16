@@ -1,6 +1,6 @@
 """Unit tests for 5-minute health check system."""
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -80,7 +80,7 @@ class TestHealthCheck:
         """Test that old build checks are removed."""
         # Create an old build
         old_build = "old-build"
-        old_time = datetime.utcnow() - timedelta(hours=25)
+        old_time = datetime.now(UTC) - timedelta(hours=25)
         _build_checks[old_build] = {
             "started_at": old_time,
             "repo": "org/repo",
@@ -89,7 +89,7 @@ class TestHealthCheck:
 
         # Create a recent build
         recent_build = "recent-build"
-        recent_time = datetime.utcnow() - timedelta(hours=1)
+        recent_time = datetime.now(UTC) - timedelta(hours=1)
         _build_checks[recent_build] = {
             "started_at": recent_time,
             "repo": "org/repo",
@@ -114,7 +114,7 @@ class TestHealthCheck:
         # Simulate what _send_health_check_update does
         check_record = _build_checks[build_id]
         started_at = check_record["started_at"]
-        elapsed = (datetime.utcnow() - started_at).total_seconds()
+        elapsed = (datetime.now(UTC) - started_at).total_seconds()
 
         blocks = [
             {
